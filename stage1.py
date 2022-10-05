@@ -22,10 +22,10 @@ from multiprocessing.pool import ThreadPool
 
 scene_type = os.environ['SCENE_TYPE']
 object_name = os.environ['OBJECT_NAME']
-scene_dir = os.environ['SCENE_DIR'] + object_name
-output_dir = os.environ['OUTPUT_DIR']
-weights_dir = output_dir + "weights"
-samples_dir = output_dir + "samples"
+scene_dir = os.environ['SCENE_DIR'] + '/' + object_name
+output_dir = os.environ['OUTPUT_DIR'] + '/' + object_name
+weights_dir = output_dir + '/' + "weights"
+samples_dir = output_dir + '/' + "samples"
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
