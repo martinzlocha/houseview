@@ -1363,33 +1363,31 @@ def render_loop(rays, vars, chunk):
       np.concatenate([z[i] for z in outs])[:l], sh + [-1]) for i in range(4)]
   return outs
 
+def generate_test_samples(iteration, model, num=5):
+  num = min(num, len(data['test']['c2w']))
+  psnrs = []
+
+  for i in range(num):
+    selected_index = len(data['test']['c2w']) * i
+    rays = camera_ray_batch(
+      data['test']['c2w'][selected_index], data['test']['hwf'])
+    gt = data['test']['images'][selected_index]
+    out = render_loop(rays, model, test_batch_size)
+    rgb = out[0]
+    acc = out[1]
+    rgb_b = out[2]
+    acc_b = out[3]
+    psnrs.append(-10 * np.log10(np.mean(np.square(rgb - gt))))
+    write_floatpoint_image(samples_dir+"/s1_"+str(iteration)+"_"+str(i)+"_rgb.png",rgb)
+    write_floatpoint_image(samples_dir+"/s1_"+str(iteration)+"_"+str(i)+"_rgb_binarized.png",rgb_b)
+    write_floatpoint_image(samples_dir+"/s1_"+str(iteration)+"_"+str(i)+"_gt.png",gt)
+    write_floatpoint_image(samples_dir+"/s1_"+str(iteration)+"_"+str(i)+"_acc.png",acc)
+    write_floatpoint_image(samples_dir+"/s1_"+str(iteration)+"_"+str(i)+"_acc_binarized.png",acc_b)
+  return np.mean(psnrs)
+
 # Make sure that everything works, by rendering an image from the test set
 
-if scene_type=="synthetic":
-  selected_test_index = 97
-  preview_image_height = 800
-
-elif scene_type=="forwardfacing":
-  selected_test_index = 0
-  preview_image_height = 756//2
-
-elif scene_type=="real360":
-  selected_test_index = 0
-  preview_image_height = 840//2
-
-rays = camera_ray_batch(
-    data['test']['c2w'][selected_test_index], data['test']['hwf'])
-gt = data['test']['images'][selected_test_index]
-out = render_loop(rays, model_vars, test_batch_size)
-rgb = out[0]
-acc = out[1]
-rgb_b = out[2]
-acc_b = out[3]
-write_floatpoint_image(samples_dir+"/s1_"+str(0)+"_rgb.png",rgb)
-write_floatpoint_image(samples_dir+"/s1_"+str(0)+"_rgb_binarized.png",rgb_b)
-write_floatpoint_image(samples_dir+"/s1_"+str(0)+"_gt.png",gt)
-write_floatpoint_image(samples_dir+"/s1_"+str(0)+"_acc.png",acc)
-write_floatpoint_image(samples_dir+"/s1_"+str(0)+"_acc_binarized.png",acc_b)
+generate_test_samples(0, model_vars)
 #%% --------------------------------------------------------------------------------
 # ## Training loop
 #%%
@@ -1540,21 +1538,13 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print('  %0.3f secs per iter.' % (t_elapsed / i_elapsed))
     print('  %0.3f iters per sec.' % (i_elapsed / t_elapsed))
 
-    vars = unreplicated_state.target
-    rays = camera_ray_batch(
-        data['test']['c2w'][selected_test_index], data['test']['hwf'])
-    gt = data['test']['images'][selected_test_index]
-    out = render_loop(rays, vars, test_batch_size)
-    rgb = out[0]
-    acc = out[1]
-    rgb_b = out[2]
-    acc_b = out[3]
-    psnrs_test.append(-10 * np.log10(np.mean(np.square(rgb - gt))))
+    test_psnr = generate_test_samples(i, unreplicated_state.target)
+    psnrs_test.append(test_psnr)
     iters_test.append(i)
 
     print("PSNR:")
     print('  Training running average: %0.3f' % np.mean(np.array(psnrs[-200:])))
-    print('  Selected test image: %0.3f' % psnrs_test[-1])
+    print('  Selected test images: %0.3f' % psnrs_test[-1])
 
     plt.figure()
     plt.title(i)
@@ -1564,12 +1554,6 @@ for i in tqdm(range(step_init, training_iters + 1)):
     plt.ylim(np.min(p) - .5, np.max(p) + .5)
     plt.legend()
     plt.savefig(samples_dir+"/s1_"+str(i)+"_loss.png")
-
-    write_floatpoint_image(samples_dir+"/s1_"+str(i)+"_rgb.png",rgb)
-    write_floatpoint_image(samples_dir+"/s1_"+str(i)+"_rgb_binarized.png",rgb_b)
-    write_floatpoint_image(samples_dir+"/s1_"+str(i)+"_gt.png",gt)
-    write_floatpoint_image(samples_dir+"/s1_"+str(i)+"_acc.png",acc)
-    write_floatpoint_image(samples_dir+"/s1_"+str(i)+"_acc_binarized.png",acc_b)
 
 #%%
 #%% --------------------------------------------------------------------------------
