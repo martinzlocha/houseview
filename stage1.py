@@ -1365,11 +1365,11 @@ def render_loop(rays, vars, chunk):
   return outs
 
 def generate_test_samples(iteration, model, num=5):
-  num = min(num, len(data['test']['c2w']))
+  num = min(num, len(data['test']['images']))
   psnrs = []
 
   for i in range(num):
-    selected_index = len(data['test']['c2w']) * i
+    selected_index = int(len(data['test']['images']) * i / num)
     rays = camera_ray_batch(
       data['test']['c2w'][selected_index], data['test']['hwf'])
     gt = data['test']['images'][selected_index]
