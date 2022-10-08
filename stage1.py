@@ -1383,7 +1383,7 @@ def generate_test_samples(iteration, model, num=5):
     write_floatpoint_image(samples_dir+"/s1_"+str(iteration)+"_"+str(i)+"_gt.png",gt)
     write_floatpoint_image(samples_dir+"/s1_"+str(iteration)+"_"+str(i)+"_acc.png",acc)
     write_floatpoint_image(samples_dir+"/s1_"+str(iteration)+"_"+str(i)+"_acc_binarized.png",acc_b)
-  return np.mean(psnrs)
+  return np.array(psnrs).mean()
 
 # Make sure that everything works, by rendering an image from the test set
 
