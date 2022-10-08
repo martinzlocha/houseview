@@ -1567,7 +1567,7 @@ frames = []
 framemasks = []
 print("Testing")
 for p in tqdm(render_poses):
-  out = render_loop(camera_ray_batch(p, hwf), vars, test_batch_size)
+  out = render_loop(camera_ray_batch(p, hwf), unreplicated_state.target, test_batch_size)
   frames.append(out[0])
   framemasks.append(out[1])
 psnrs_test = [-10 * np.log10(np.mean(np.square(rgb - gt))) for (rgb, gt) in zip(frames, data['test']['images'])]
@@ -1658,4 +1658,4 @@ print("Test set average SSIM: %f" % np.array(ssim_values).mean())
 #%% --------------------------------------------------------------------------------
 # ## Save weights
 #%%
-pickle.dump(vars, open(weights_dir+"/"+"weights_stage1.pkl", "wb"))
+pickle.dump(unreplicated_state.target, open(weights_dir+"/"+"weights_stage1.pkl", "wb"))
