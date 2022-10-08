@@ -25,7 +25,7 @@ scene_dir = os.environ['SCENE_DIR'] + '/' + object_name
 output_dir = os.environ['OUTPUT_DIR'] + '/' + object_name
 weights_dir = output_dir + '/' + "weights"
 samples_dir = output_dir + '/' + "samples"
-factor = os.environ['FACTOR'] or 2
+factor = int(os.environ['FACTOR']) or 4
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
