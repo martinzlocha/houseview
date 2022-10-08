@@ -25,6 +25,7 @@ scene_dir = os.environ['SCENE_DIR'] + '/' + object_name
 output_dir = os.environ['OUTPUT_DIR'] + '/' + object_name
 weights_dir = output_dir + '/' + "weights"
 samples_dir = output_dir + '/' + "samples"
+factor = os.environ['FACTOR'] or 2
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -268,8 +269,8 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
 
     return {'images' : jnp.array(images), 'c2w' : jnp.array(camtoworlds), 'hwf' : jnp.array(hwf)}
 
-  data = {'train' : load_LLFF(scene_dir, 'train'),
-          'test' : load_LLFF(scene_dir, 'test')}
+  data = {'train' : load_LLFF(scene_dir, 'train', factor),
+          'test' : load_LLFF(scene_dir, 'test', factor)}
 
   splits = ['train', 'test']
   for s in splits:
