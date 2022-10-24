@@ -26,6 +26,8 @@ output_dir = os.environ['OUTPUT_DIR'] + '/' + object_name
 weights_dir = output_dir + '/' + "weights"
 samples_dir = output_dir + '/' + "samples"
 factor = int(os.environ['FACTOR']) or 4
+image_dtype = np.float16 if os.environ['DTYPE'] == '16' else np.float32
+test_samples = os.environ['TEST_SAMPLES'] or 1
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -79,7 +81,7 @@ if scene_type=="synthetic":
 
     def image_read_fn(fname):
       with open(fname, "rb") as imgin:
-        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
+        image = np.array(Image.open(imgin), dtype=image_dtype) / 255.
       return image
     with ThreadPool() as pool:
       images = pool.map(image_read_fn, paths)
@@ -209,13 +211,15 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
     ]
     def image_read_fn(fname):
       with open(fname, "rb") as imgin:
-        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
+        image = np.array(Image.open(imgin), dtype=image_dtype) / 255.
       return image
     with ThreadPool() as pool:
       images = pool.map(image_read_fn, imgfiles)
       pool.close()
       pool.join()
     images = np.stack(images, axis=-1)
+
+    gc.collect()
 
     # Load poses and bds.
     with open(os.path.join(data_dir, "poses_bounds.npy"),
@@ -237,7 +241,6 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
     poses = np.moveaxis(poses, -1, 0).astype(np.float32)
     images = np.moveaxis(images, -1, 0)
     bds = np.moveaxis(bds, -1, 0).astype(np.float32)
-
 
     if scene_type=="real360":
       # Rotate/scale poses to align ground with xy plane and fit to unit cube.
@@ -267,6 +270,7 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
 
     hwf = np.array([h, w, focal], dtype=np.float32)
 
+    gc.collect()
     return {'images' : jnp.array(images), 'c2w' : jnp.array(camtoworlds), 'hwf' : jnp.array(hwf)}
 
   data = {'train' : load_LLFF(scene_dir, 'train', factor),
@@ -290,6 +294,9 @@ elif scene_type=="forwardfacing" or scene_type=="real360":
   bg_color = jnp.mean(images)
 
   import jax.numpy as np
+
+print('Loaded data')
+gc.collect()
 #%% --------------------------------------------------------------------------------
 # ## Helper functions
 #%%
@@ -461,8 +468,9 @@ elif scene_type=="real360":
     1/0
 
 
+print('Initializing point grid')
 
-grid_dtype = np.float32
+grid_dtype = image_dtype
 
 #plane parameter grid
 point_grid = np.zeros(
@@ -473,7 +481,7 @@ acc_grid = np.zeros(
       dtype=grid_dtype)
 point_grid_diff_lr_scale = 16.0/point_grid_size
 
-
+print('Initialized grid')
 
 def get_acc_grid_masks(taper_positions, acc_grid):
   grid_positions = (taper_positions - grid_min) * \
@@ -1200,6 +1208,7 @@ def compute_box_intersection(rays):
 #%%
 num_bottleneck_features = 8
 
+print('MLP setup')
 
 def dense_layer(width):
   return nn.Dense(
@@ -1259,6 +1268,8 @@ model_vars = [point_grid, acc_grid,
                   jax.random.PRNGKey(0),
                   np.zeros([1, 3+num_bottleneck_features])),
               ]
+
+print('Model vars set up')
 
 #avoid bugs
 point_grid = None
@@ -1364,11 +1375,11 @@ def render_loop(rays, vars, chunk):
       np.concatenate([z[i] for z in outs])[:l], sh + [-1]) for i in range(4)]
   return outs
 
-def generate_test_samples(iteration, model, num=5):
+def generate_test_samples(iteration, model, num=test_samples):
   num = min(num, len(data['test']['images']))
   psnrs = []
 
-  for i in range(num):
+  for i in tqdm(range(num)):
     selected_index = int(len(data['test']['images']) * i / num)
     rays = camera_ray_batch(
       data['test']['c2w'][selected_index], data['test']['hwf'])
@@ -1386,9 +1397,14 @@ def generate_test_samples(iteration, model, num=5):
     write_floatpoint_image(samples_dir+"/s1_"+str(iteration)+"_"+str(i)+"_acc_binarized.png",acc_b)
   return np.array(psnrs).mean()
 
+print('Generating test samples')
+
 # Make sure that everything works, by rendering an image from the test set
 
 generate_test_samples(0, model_vars)
+
+print('Generated test samples')
+
 #%% --------------------------------------------------------------------------------
 # ## Training loop
 #%%
