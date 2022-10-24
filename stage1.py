@@ -27,7 +27,7 @@ weights_dir = output_dir + '/' + "weights"
 samples_dir = output_dir + '/' + "samples"
 factor = int(os.environ['FACTOR']) or 4
 image_dtype = np.float16 if os.environ['DTYPE'] == '16' else np.float32
-test_samples = os.environ['TEST_SAMPLES'] or 1
+test_samples = int(os.environ['TEST_SAMPLES']) or 1
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
