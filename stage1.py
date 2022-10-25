@@ -25,11 +25,11 @@ scene_dir = os.environ['SCENE_DIR'] + '/' + object_name
 output_dir = os.environ['OUTPUT_DIR'] + '/' + object_name
 weights_dir = output_dir + '/' + "weights"
 samples_dir = output_dir + '/' + "samples"
-factor = int(os.environ['FACTOR'] or 4)
+factor = int(os.environ['FACTOR'])
 image_dtype = np.float16 if os.environ['DTYPE'] == '16' else np.float32
-test_samples = int(os.environ['TEST_SAMPLES'] or 1)
-use_depth = bool(os.environ['USE_DEPTH'] or False)
-take_every_n = int(os.environ['TAKE_EVERY_N'] or 1)
+test_samples = int(os.environ['TEST_SAMPLES'])
+use_depth = os.environ['USE_DEPTH'] == 'True'
+take_every_n = int(os.environ['TAKE_EVERY_N'])
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -190,6 +190,7 @@ def load_LLFF(data_dir, factor = 4, llffhold = 8):
                         "rb") as fp:
     poses_arr = np.load(fp)
   poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
+  poses = poses[:, :, ::take_every_n]
   bds = poses_arr[:, -2:].transpose([1, 0])
   if poses.shape[-1] != images.shape[-1]:
     raise RuntimeError("Mismatch between imgs {} and poses {}".format(
