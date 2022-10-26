@@ -171,7 +171,7 @@ def load_LLFF(data_dir, factor = 4, llffhold = 8):
   gc.collect()
 
   if use_depth:
-    depth_files = [name.replace("images", "depth") for name in imgfiles]
+    depth_files = [name.replace("images" + imgdir_suffix, "depth").replace('jpg', 'exr') for name in imgfiles]
 
     def depth_read_fn(fname):
       image = cv2.imread(fname, -1).astype(image_dtype)
@@ -247,8 +247,8 @@ def load_LLFF(data_dir, factor = 4, llffhold = 8):
   data = {'train': {'images' : jnp.array(train_images), 'c2w' : jnp.array(train_camtoworlds), 'hwf' : jnp.array(hwf)},
           'test': {'images' : jnp.array(test_images), 'c2w' : jnp.array(test_camtoworlds), 'hwf' : jnp.array(hwf)}}
   if use_depth:
-    data['train']['depth'] = train_depths
-    data['test']['depth'] = test_depths
+    data['train']['depths'] = train_depths
+    data['test']['depths'] = test_depths
   return data
 
 data = load_LLFF(scene_dir, factor)
@@ -260,6 +260,8 @@ for s in splits:
     print(f'  {k}: {data[s][k].shape}')
 
 images, poses, hwf = data['train']['images'], data['train']['c2w'], data['train']['hwf']
+if use_depth:
+  depths = data['train']['depths']
 write_floatpoint_image(samples_dir+"/training_image_sample.png",images[0])
 
 for i in range(3):
@@ -1286,10 +1288,15 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   weights = compute_volumetric_rendering_weights_with_alpha(mlp_alpha)
   acc = np.sum(weights, axis=-1)
 
+  pts_dist = np.linalg.norm(pts[:, 1:, :] - pts[:, :-1, :], axis=-1)
+  avg_dist = np.sum(pts_dist * weights[:, 1:], axis=-1)
+
   mlp_alpha_b = mlp_alpha + jax.lax.stop_gradient(
     np.clip((mlp_alpha>0.5).astype(mlp_alpha.dtype), 0.00001,0.99999) - mlp_alpha)
   weights_b = compute_volumetric_rendering_weights_with_alpha(mlp_alpha_b)
   acc_b = np.sum(weights_b, axis=-1)
+
+  avg_dist_b = np.sum(pts_dist * weights[:, 1:], axis=-1)
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1])
@@ -1378,7 +1385,7 @@ print('Generating test samples')
 
 # Make sure that everything works, by rendering an image from the test set
 
-generate_test_samples(0, model_vars)
+# generate_test_samples(0, model_vars)
 
 print('Generated test samples')
 
