@@ -30,6 +30,7 @@ image_dtype = np.float16 if os.environ['DTYPE'] == '16' else np.float32
 test_samples = int(os.environ['TEST_SAMPLES'])
 use_depth = os.environ['USE_DEPTH'] == 'True'
 take_every_n = int(os.environ['TAKE_EVERY_N'])
+depth_weight = float(os.environ['DEPTH_WEIGHT'])
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -53,8 +54,6 @@ def write_floatpoint_image(name,img):
 # ## Load the dataset
 #%%
 # """ Load dataset """
-
-white_bkgd = False
 
 #https://github.com/google-research/google-research/blob/master/snerg/nerf/datasets.py
 
@@ -264,6 +263,7 @@ for i in range(3):
   plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
 
 bg_color = jnp.mean(images)
+mean_dist = jnp.mean(depths)
 
 import jax.numpy as np
 
@@ -1294,8 +1294,10 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
 
   if use_depth:
     pts_dist = np.linalg.norm(pts[:, 1:, :] - pts[:, :-1, :], axis=-1)
-    weigheted_dist = np.nansum(pts_dist * weights[:, 1:], axis=-1)
-    weigheted_dist_b = np.nansum(pts_dist * weights[:, 1:], axis=-1)
+    cum_dist = np.nancumsum(pts_dist, axis=-1)
+    cum_dist = jax.lax.stop_gradient(cum_dist)
+    weigheted_dist = np.sum(cum_dist * weights[:, 1:], axis=-1)
+    weigheted_dist_b = np.sum(cum_dist * weights[:, 1:], axis=-1)
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1])
@@ -1309,19 +1311,18 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   rgb = np.sum(weights[..., None] * colors, axis=-2)
   rgb_b = np.sum(weights_b[..., None] * colors, axis=-2)
 
-  # Composite onto the background color.
-  if white_bkgd:
-    rgb = rgb + (1. - acc[..., None])
-    rgb_b = rgb_b + (1. - acc_b[..., None])
-  else:
-    bgc = random.randint(rng, [1], 0, 2).astype(bg_color.dtype) * wbgcolor + \
-          bg_color * (1-wbgcolor)
-    rgb = rgb + (1. - acc[..., None]) * bgc
-    rgb_b = rgb_b + (1. - acc_b[..., None]) * bgc
+  bgc = random.randint(rng, [1], 0, 2).astype(bg_color.dtype) * wbgcolor + \
+        bg_color * (1-wbgcolor)
+  rgb = rgb + (1. - acc[..., None]) * bgc
+  rgb_b = rgb_b + (1. - acc_b[..., None]) * bgc
 
   #get acc_grid_masks to update acc_grid
   acc_grid_masks = get_acc_grid_masks(pts, vars[1])
   acc_grid_masks = acc_grid_masks*grid_masks
+
+  if use_depth:
+    weigheted_dist = weigheted_dist + (1. - acc) * mean_dist
+    weigheted_dist_b = weigheted_dist_b + (1. - acc_b) * mean_dist
 
   return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b
 #%% --------------------------------------------------------------------------------
@@ -1440,7 +1441,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     point_mask = point_loss<(grid_max - grid_min)/point_grid_size/2
     point_loss = np.mean(np.where(point_mask, point_loss_in, point_loss_out))
 
-    return loss_color_l2 + dist_loss_l2 + loss_distortion + loss_acc + point_loss, (loss_color_l2, dist_loss_l2)
+    return loss_color_l2 + (dist_loss_l2 * depth_weight) + loss_distortion + loss_acc + point_loss, (loss_color_l2, 0)
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (total_loss, (color_loss_l2, dist_loss_l2)), grad = grad_fn(state.target)
