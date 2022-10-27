@@ -1294,8 +1294,8 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
 
   if use_depth:
     pts_dist = np.linalg.norm(pts[:, 1:, :] - pts[:, :-1, :], axis=-1)
-    weigheted_dist = np.sum(pts_dist * weights[:, 1:], axis=-1)
-    weigheted_dist_b = np.sum(pts_dist * weights[:, 1:], axis=-1)
+    weigheted_dist = np.nansum(pts_dist * weights[:, 1:], axis=-1)
+    weigheted_dist_b = np.nansum(pts_dist * weights[:, 1:], axis=-1)
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1])
