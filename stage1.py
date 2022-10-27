@@ -130,7 +130,7 @@ def _transform_poses_pca(poses):
 
   poses_[:, :3, :4] = poses_recentered[:, :3, :4]
   poses_recentered = poses_
-  return poses_recentered, transform
+  return poses_recentered, transform, scale_factor
 
 def resize_images(images, H, W, interpolation=cv2.INTER_LINEAR):
   resized = np.zeros((images.shape[0], H, W, images.shape[3]), dtype=images.dtype)
@@ -191,7 +191,6 @@ def load_LLFF(data_dir, factor = 4, llffhold = 8):
     poses_arr = np.load(fp)
   poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
   poses = poses[:, :, ::take_every_n]
-  bds = poses_arr[:, -2:].transpose([1, 0])
   if poses.shape[-1] != images.shape[-1]:
     raise RuntimeError("Mismatch between imgs {} and poses {}".format(
         images.shape[-1], poses.shape[-1]))
@@ -208,18 +207,12 @@ def load_LLFF(data_dir, factor = 4, llffhold = 8):
   if use_depth:
     depths = np.moveaxis(depths, -1, 0)
     depths = resize_images(depths, images.shape[1], images.shape[2])
-  bds = np.moveaxis(bds, -1, 0).astype(np.float32)
+    depths = depths[:, :, :, 2]
 
-  if scene_type=="real360":
-    # Rotate/scale poses to align ground with xy plane and fit to unit cube.
-    poses, _ = _transform_poses_pca(poses)
-  else:
-    # Rescale according to a default bd factor.
-    scale = 1. / (bds.min() * .75)
-    poses[:, :3, 3] *= scale
-    bds *= scale
-    # Recenter poses
-    poses = _recenter_poses(poses)
+  # Rotate/scale poses to align ground with xy plane and fit to unit cube.
+  poses, _, scale = _transform_poses_pca(poses)
+  if use_depth:
+    depths *= scale
 
   # Select the split.
   i_test = np.arange(images.shape[0])[::llffhold]
@@ -356,7 +349,10 @@ def random_ray_batch(rng, batch_size, data):
   cam2world = data['c2w'][cam_ind, :3, :4]
   rays = generate_rays(pixel_coords, pix2cam, cam2world)
   pixels = data['images'][cam_ind, y_ind, x_ind]
-  return rays, pixels
+  distances = None
+  if use_depth:
+    distances = data['depths'][cam_ind, y_ind, x_ind]
+  return rays, pixels, distances
 
 
 # Learning rate helpers.
@@ -1288,15 +1284,18 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   weights = compute_volumetric_rendering_weights_with_alpha(mlp_alpha)
   acc = np.sum(weights, axis=-1)
 
-  pts_dist = np.linalg.norm(pts[:, 1:, :] - pts[:, :-1, :], axis=-1)
-  avg_dist = np.sum(pts_dist * weights[:, 1:], axis=-1)
-
   mlp_alpha_b = mlp_alpha + jax.lax.stop_gradient(
     np.clip((mlp_alpha>0.5).astype(mlp_alpha.dtype), 0.00001,0.99999) - mlp_alpha)
   weights_b = compute_volumetric_rendering_weights_with_alpha(mlp_alpha_b)
   acc_b = np.sum(weights_b, axis=-1)
 
-  avg_dist_b = np.sum(pts_dist * weights[:, 1:], axis=-1)
+  weigheted_dist = None
+  weigheted_dist_b = None
+
+  if use_depth:
+    pts_dist = np.linalg.norm(pts[:, 1:, :] - pts[:, :-1, :], axis=-1)
+    weigheted_dist = np.sum(pts_dist * weights[:, 1:], axis=-1)
+    weigheted_dist_b = np.sum(pts_dist * weights[:, 1:], axis=-1)
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1])
@@ -1324,7 +1323,7 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   acc_grid_masks = get_acc_grid_masks(pts, vars[1])
   acc_grid_masks = acc_grid_masks*grid_masks
 
-  return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks
+  return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b
 #%% --------------------------------------------------------------------------------
 # ## Set up pmap'd rendering for test time evaluation.
 #%%
@@ -1414,15 +1413,20 @@ def compute_TV(acc_grid):
 
 def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
   key, rng = random.split(rng)
-  rays, pixels = random_ray_batch(
+  rays, pixels, distances = random_ray_batch(
       key, batch_size // n_device, traindata)
 
   def loss_fn(vars):
-    rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks = render_rays(
+    rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b = render_rays(
         rays, vars, keep_num, threshold, wbgcolor, rng)
 
     loss_color_l2 = np.mean(np.square(rgb_est - pixels))
     #loss_color_l2_b = np.mean(np.square(rgb_est_b - pixels))
+
+    dist_loss_l2 = 0
+    if use_depth:
+      dist_loss_l2 = np.mean(np.square(distances - weigheted_dist))
+      # dist_loss_l2_b = np.mean(np.square(distances - weigheted_dist_b))
 
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
     loss_acc += np.mean(np.abs(vars[1])) *1e-5
@@ -1436,17 +1440,18 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     point_mask = point_loss<(grid_max - grid_min)/point_grid_size/2
     point_loss = np.mean(np.where(point_mask, point_loss_in, point_loss_out))
 
-    return loss_color_l2 + loss_distortion + loss_acc + point_loss, loss_color_l2
+    return loss_color_l2 + dist_loss_l2 + loss_distortion + loss_acc + point_loss, (loss_color_l2, dist_loss_l2)
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (total_loss, color_loss_l2), grad = grad_fn(state.target)
+  (total_loss, (color_loss_l2, dist_loss_l2)), grad = grad_fn(state.target)
   total_loss = jax.lax.pmean(total_loss, axis_name='batch')
   color_loss_l2 = jax.lax.pmean(color_loss_l2, axis_name='batch')
+  dist_loss_l2 = jax.lax.pmean(dist_loss_l2, axis_name='batch')
 
   grad = jax.lax.pmean(grad, axis_name='batch')
   state = state.apply_gradient(grad, learning_rate=lr)
 
-  return state, color_loss_l2
+  return state, color_loss_l2, dist_loss_l2
 
 train_pstep = jax.pmap(train_step, axis_name='batch',
                        in_axes=(0, 0, 0, None, None, None, None, None, None, None),
@@ -1460,8 +1465,10 @@ print(f'starting at {step_init}')
 
 # Training loop
 psnrs = []
+dist_loss = []
 iters = []
 psnrs_test = []
+dist_loss_test = []
 iters_test = []
 t_total = 0.0
 t_last = 0.0
@@ -1502,7 +1509,7 @@ for i in tqdm(range(step_init, training_iters + 1)):
 
   rng, key1, key2 = random.split(rng, 3)
   key2 = random.split(key2, n_device)
-  state, color_loss_l2 = train_pstep(
+  state, color_loss_l2, dist_loss_l2 = train_pstep(
       state, key2, traindata_p,
       lr,
       wdistortion,
@@ -1514,12 +1521,19 @@ for i in tqdm(range(step_init, training_iters + 1)):
       )
 
   psnrs.append(-10. * np.log10(color_loss_l2[0]))
+  if use_depth:
+    dist_loss.append(dist_loss_l2)
   iters.append(i)
 
   if i > 0:
     t_total += time.time() - t
 
   # Logging
+  if (i % 1000 == 0) and i > 0:
+    print('PSNR: %0.3f' % np.mean(np.array(psnrs[-200:])))
+    if use_depth:
+      print("Dist loss: %0.3f" % np.mean(np.array(dist_loss[-200:])))
+
   if (i % 10000 == 0) and i > 0:
     gc.collect()
 
@@ -1546,6 +1560,9 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print("PSNR:")
     print('  Training running average: %0.3f' % np.mean(np.array(psnrs[-200:])))
     print('  Selected test images: %0.3f' % psnrs_test[-1])
+
+    if use_depth:
+      print("Dist loss: %0.3f" % np.mean(np.array(dist_loss[-200:])))
 
     plt.figure()
     plt.title(i)
