@@ -42,6 +42,8 @@ depth_weight = float(os.environ['DEPTH_WEIGHT'])
 # bicycle flowerbed gardenvase stump treehill
 # fulllivingroom kitchencounter kitchenlego officebonsai
 
+depth_scale = 1
+
 print(jax.local_devices())
 if not os.path.exists(weights_dir):
   os.makedirs(weights_dir)
@@ -198,9 +200,7 @@ def load_LLFF(data_dir, factor = 4, llffhold = 8):
   poses[:2, 4, :] = np.array(images.shape[:2]).reshape([2, 1])
   poses[2, 4, :] = poses[2, 4, :] * 1. / factor
 
-  # Correct rotation matrix ordering and move variable dim to axis 0.
-  poses = np.concatenate(
-      [poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1)
+  # Move variable dim to axis 0.
   poses = np.moveaxis(poses, -1, 0).astype(np.float32)
   images = np.moveaxis(images, -1, 0)
   if use_depth:
@@ -211,6 +211,7 @@ def load_LLFF(data_dir, factor = 4, llffhold = 8):
   # Rotate/scale poses to align ground with xy plane and fit to unit cube.
   poses, _, scale = _transform_poses_pca(poses)
   if use_depth:
+    depth_scale = scale
     depths *= scale
 
   # Select the split.
@@ -263,7 +264,8 @@ for i in range(3):
   plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
 
 bg_color = jnp.mean(images)
-mean_dist = jnp.mean(depths)
+if use_depth:
+  mean_dist = jnp.mean(depths)
 
 import jax.numpy as np
 
@@ -1427,7 +1429,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     dist_loss_l2 = 0
     if use_depth:
       dist_loss_l2 = np.mean(np.square(distances - weigheted_dist))
-      # dist_loss_l2_b = np.mean(np.square(distances - weigheted_dist_b))
+      dist_err = np.mean(np.abs(distances - weigheted_dist))
 
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
     loss_acc += np.mean(np.abs(vars[1])) *1e-5
@@ -1441,18 +1443,18 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     point_mask = point_loss<(grid_max - grid_min)/point_grid_size/2
     point_loss = np.mean(np.where(point_mask, point_loss_in, point_loss_out))
 
-    return loss_color_l2 + (dist_loss_l2 * depth_weight) + loss_distortion + loss_acc + point_loss, (loss_color_l2, 0)
+    return loss_color_l2 + (dist_loss_l2 * depth_weight) + loss_distortion + loss_acc + point_loss, (loss_color_l2, dist_err)
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (total_loss, (color_loss_l2, dist_loss_l2)), grad = grad_fn(state.target)
+  (total_loss, (color_loss_l2, dist_err)), grad = grad_fn(state.target)
   total_loss = jax.lax.pmean(total_loss, axis_name='batch')
   color_loss_l2 = jax.lax.pmean(color_loss_l2, axis_name='batch')
-  dist_loss_l2 = jax.lax.pmean(dist_loss_l2, axis_name='batch')
+  dist_err = jax.lax.pmean(dist_err, axis_name='batch')
 
   grad = jax.lax.pmean(grad, axis_name='batch')
   state = state.apply_gradient(grad, learning_rate=lr)
 
-  return state, color_loss_l2, dist_loss_l2
+  return state, color_loss_l2, dist_err
 
 train_pstep = jax.pmap(train_step, axis_name='batch',
                        in_axes=(0, 0, 0, None, None, None, None, None, None, None),
@@ -1466,10 +1468,9 @@ print(f'starting at {step_init}')
 
 # Training loop
 psnrs = []
-dist_loss = []
+dist_err_real = []
 iters = []
 psnrs_test = []
-dist_loss_test = []
 iters_test = []
 t_total = 0.0
 t_last = 0.0
@@ -1510,7 +1511,7 @@ for i in tqdm(range(step_init, training_iters + 1)):
 
   rng, key1, key2 = random.split(rng, 3)
   key2 = random.split(key2, n_device)
-  state, color_loss_l2, dist_loss_l2 = train_pstep(
+  state, color_loss_l2, dist_err = train_pstep(
       state, key2, traindata_p,
       lr,
       wdistortion,
@@ -1523,7 +1524,7 @@ for i in tqdm(range(step_init, training_iters + 1)):
 
   psnrs.append(-10. * np.log10(color_loss_l2[0]))
   if use_depth:
-    dist_loss.append(dist_loss_l2)
+    dist_err_real.append(dist_err / depth_scale)
   iters.append(i)
 
   if i > 0:
@@ -1533,7 +1534,7 @@ for i in tqdm(range(step_init, training_iters + 1)):
   if (i % 1000 == 0) and i > 0:
     print('PSNR: %0.3f' % np.mean(np.array(psnrs[-200:])))
     if use_depth:
-      print("Dist loss: %0.3f" % np.mean(np.array(dist_loss[-200:])))
+      print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-200:])))
 
   if (i % 10000 == 0) and i > 0:
     gc.collect()
@@ -1563,7 +1564,7 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print('  Selected test images: %0.3f' % psnrs_test[-1])
 
     if use_depth:
-      print("Dist loss: %0.3f" % np.mean(np.array(dist_loss[-200:])))
+      print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-200:])))
 
     plt.figure()
     plt.title(i)
