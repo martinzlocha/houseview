@@ -340,7 +340,27 @@ def camera_ray_batch(cam2world, hwf):
   pixel_coords = np.stack(np.meshgrid(np.arange(width), np.arange(height)), axis=-1)
   return generate_rays(pixel_coords, pix2cam, cam2world)
 
-def random_ray_batch(rng, batch_size, data):
+def get_rotation_matrices(rotations):
+  cos_alpha = np.cos(rotations[:, 0])
+  cos_beta = np.cos(rotations[:, 1])
+  cos_gamma = np.cos(rotations[:, 2])
+  sin_alpha = np.sin(rotations[:, 0])
+  sin_beta = np.sin(rotations[:, 1])
+  sin_gamma = np.sin(rotations[:, 2])
+
+  col1 = np.stack([cos_alpha * cos_beta,
+                    sin_alpha * cos_beta,
+                    -sin_beta], -1)
+  col2 = np.stack([cos_alpha * sin_beta * sin_gamma - sin_alpha * cos_gamma,
+                    sin_alpha * sin_beta * sin_gamma + cos_alpha * cos_gamma,
+                    cos_beta * sin_gamma], -1)
+  col3 = np.stack([cos_alpha * sin_beta * cos_gamma + sin_alpha * sin_gamma,
+                    sin_alpha * sin_beta * cos_gamma - cos_alpha * sin_gamma,
+                    cos_beta * cos_gamma], -1)
+
+  return np.stack([col1, col2, col3], -1)
+
+def random_ray_batch(rng, batch_size, data, vars):
   """Generate a random batch of ray data."""
   keys = random.split(rng, 3)
   cam_ind = random.randint(keys[0], [batch_size], 0, data['c2w'].shape[0])
@@ -349,12 +369,20 @@ def random_ray_batch(rng, batch_size, data):
   pixel_coords = np.stack([x_ind, y_ind], axis=-1)
   pix2cam = pix2cam_matrix(*data['hwf'])
   cam2world = data['c2w'][cam_ind, :3, :4]
-  rays = generate_rays(pixel_coords, pix2cam, cam2world)
+  (ray_origin, ray_direction) = generate_rays(pixel_coords, pix2cam, cam2world)
+
+  rotation_vectors = vars[-4][cam_ind, :3]
+  rotation_matrices = get_rotation_matrices(rotation_vectors)
+  translation_vectors = vars[-4][cam_ind, 3:]
+
+  ray_origin = matmul(ray_origin, rotation_matrices) + translation_vectors
+  ray_direction = matmul(ray_direction, rotation_matrices)
+
   pixels = data['images'][cam_ind, y_ind, x_ind]
   distances = None
   if use_depth:
     distances = data['depths'][cam_ind, y_ind, x_ind]
-  return rays, pixels, distances
+  return (ray_origin, ray_direction), pixels, distances
 
 
 # Learning rate helpers.
@@ -1233,8 +1261,12 @@ density_model = RadianceField(1)
 feature_model = RadianceField(num_bottleneck_features)
 color_model = MLP([16,16,3])
 
+num_images = data['train']['images'].shape[0]
+pose_array = np.zeros((num_images, 6), dtype=np.float32)
+
 # These are the variables we will be optimizing during trianing.
 model_vars = [point_grid, acc_grid,
+              pose_array,
               density_model.init(
                   jax.random.PRNGKey(0),
                   np.zeros([1, 3])),
@@ -1416,10 +1448,11 @@ def compute_TV(acc_grid):
 
 def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
   key, rng = random.split(rng)
-  rays, pixels, distances = random_ray_batch(
-      key, batch_size // n_device, traindata)
 
   def loss_fn(vars):
+    rays, pixels, distances = random_ray_batch(
+        key, batch_size // n_device, traindata, vars)
+
     rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b = render_rays(
         rays, vars, keep_num, threshold, wbgcolor, rng)
 
