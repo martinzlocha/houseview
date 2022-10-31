@@ -375,8 +375,8 @@ def random_ray_batch(rng, batch_size, data, vars):
   rotation_matrices = get_rotation_matrices(rotation_vectors)
   translation_vectors = vars[-4][cam_ind, 3:]
 
-  ray_origin = matmul(ray_origin, rotation_matrices) + translation_vectors
-  ray_direction = matmul(ray_direction, rotation_matrices)
+  ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
+  ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
 
   pixels = data['images'][cam_ind, y_ind, x_ind]
   distances = None
@@ -1568,6 +1568,10 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print('PSNR: %0.3f' % np.mean(np.array(psnrs[-200:])))
     if use_depth:
       print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-200:])))
+
+    unreplicated_state = flax.jax_utils.unreplicate(state)
+    translation_vectors = unreplicated_state.target[-4][3:]
+    print("Translation correction: %0.3f" % np.mean(np.linalg.norm(translation_vectors, axis=-1)))
 
   if (i % 10000 == 0) and i > 0:
     gc.collect()
