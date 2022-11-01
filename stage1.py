@@ -1455,14 +1455,13 @@ def random_ray_batch(rng, batch_size, data, vars):
 
   if use_pose:
     if pose_type == 'radiance':
-      output = jax.nn.sigmoid(pose_model.apply(vars[-4], ray_origin))
-      rotation_vectors = output[..., :3]
-      rotation_matrices = get_rotation_matrices(rotation_vectors)
-      translation_vectors = output[..., 3:]
+      pose_shift = jax.nn.sigmoid(pose_model.apply(vars[-4], ray_origin))
     else:
-      rotation_vectors = vars[-4][cam_ind, :3]
-      rotation_matrices = get_rotation_matrices(rotation_vectors)
-      translation_vectors = vars[-4][cam_ind, 3:]
+      pose_shift = vars[-4][cam_ind, :]
+
+    rotation_vectors = pose_shift[..., :3]
+    rotation_matrices = get_rotation_matrices(rotation_vectors)
+    translation_vectors = pose_shift[..., 3:]
 
     ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
     ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
@@ -1471,13 +1470,13 @@ def random_ray_batch(rng, batch_size, data, vars):
   distances = None
   if use_depth:
     distances = data['depths'][cam_ind, y_ind, x_ind]
-  return (ray_origin, ray_direction), pixels, distances
+  return (ray_origin, ray_direction), pixels, distances, pose_shift
 
 def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
   key, rng = random.split(rng)
 
   def loss_fn(vars):
-    rays, pixels, distances = random_ray_batch(
+    rays, pixels, distances, pose_shift = random_ray_batch(
         key, batch_size // n_device, traindata, vars)
 
     rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b = render_rays(
@@ -1492,8 +1491,9 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
       dist_err = np.mean(np.abs(distances - weigheted_dist))
 
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
-    loss_acc += np.mean(np.abs(vars[1])) *1e-5
-    loss_acc += compute_TV(vars[1]) *1e-5
+    loss_acc += np.mean(np.abs(vars[1])) * 1e-5
+    loss_acc += compute_TV(vars[1]) * 1e-5
+    loss_acc += np.mean(np.square(pose_shift)) * 1e-5
 
     loss_distortion = np.mean(lossfun_distortion(fake_t, weights)) *wdistortion
 
