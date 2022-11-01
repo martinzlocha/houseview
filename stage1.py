@@ -31,6 +31,8 @@ test_samples = int(os.environ['TEST_SAMPLES'])
 use_depth = os.environ['USE_DEPTH'] == 'True'
 take_every_n = int(os.environ['TAKE_EVERY_N'])
 depth_weight = float(os.environ['DEPTH_WEIGHT'])
+use_pose = os.environ['USE_POSE'] == 'True'
+pose_type = os.environ['POSE_TYPE'] or 'radiance'
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -339,51 +341,6 @@ def camera_ray_batch(cam2world, hwf):
   pix2cam = pix2cam_matrix(*hwf)
   pixel_coords = np.stack(np.meshgrid(np.arange(width), np.arange(height)), axis=-1)
   return generate_rays(pixel_coords, pix2cam, cam2world)
-
-def get_rotation_matrices(rotations):
-  cos_alpha = np.cos(rotations[:, 0])
-  cos_beta = np.cos(rotations[:, 1])
-  cos_gamma = np.cos(rotations[:, 2])
-  sin_alpha = np.sin(rotations[:, 0])
-  sin_beta = np.sin(rotations[:, 1])
-  sin_gamma = np.sin(rotations[:, 2])
-
-  col1 = np.stack([cos_alpha * cos_beta,
-                    sin_alpha * cos_beta,
-                    -sin_beta], -1)
-  col2 = np.stack([cos_alpha * sin_beta * sin_gamma - sin_alpha * cos_gamma,
-                    sin_alpha * sin_beta * sin_gamma + cos_alpha * cos_gamma,
-                    cos_beta * sin_gamma], -1)
-  col3 = np.stack([cos_alpha * sin_beta * cos_gamma + sin_alpha * sin_gamma,
-                    sin_alpha * sin_beta * cos_gamma - cos_alpha * sin_gamma,
-                    cos_beta * cos_gamma], -1)
-
-  return np.stack([col1, col2, col3], -1)
-
-def random_ray_batch(rng, batch_size, data, vars):
-  """Generate a random batch of ray data."""
-  keys = random.split(rng, 3)
-  cam_ind = random.randint(keys[0], [batch_size], 0, data['c2w'].shape[0])
-  y_ind = random.randint(keys[1], [batch_size], 0, data['images'].shape[1])
-  x_ind = random.randint(keys[2], [batch_size], 0, data['images'].shape[2])
-  pixel_coords = np.stack([x_ind, y_ind], axis=-1)
-  pix2cam = pix2cam_matrix(*data['hwf'])
-  cam2world = data['c2w'][cam_ind, :3, :4]
-  (ray_origin, ray_direction) = generate_rays(pixel_coords, pix2cam, cam2world)
-
-  rotation_vectors = vars[-4][cam_ind, :3]
-  rotation_matrices = get_rotation_matrices(rotation_vectors)
-  translation_vectors = vars[-4][cam_ind, 3:]
-
-  ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
-  ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
-
-  pixels = data['images'][cam_ind, y_ind, x_ind]
-  distances = None
-  if use_depth:
-    distances = data['depths'][cam_ind, y_ind, x_ind]
-  return (ray_origin, ray_direction), pixels, distances
-
 
 # Learning rate helpers.
 
@@ -1261,12 +1218,18 @@ density_model = RadianceField(1)
 feature_model = RadianceField(num_bottleneck_features)
 color_model = MLP([16,16,3])
 
-num_images = data['train']['images'].shape[0]
-pose_array = np.zeros((num_images, 6), dtype=np.float32)
+if pose_type == 'radiance':
+  pose_model = RadianceField(6)
+  pose_weights = pose_model.init(
+                  jax.random.PRNGKey(0),
+                  np.zeros([1, 3]))
+else:
+  num_images = data['train']['images'].shape[0]
+  pose_weights = np.zeros((num_images, 6), dtype=np.float32)
 
 # These are the variables we will be optimizing during trianing.
 model_vars = [point_grid, acc_grid,
-              pose_array,
+              pose_weights,
               density_model.init(
                   jax.random.PRNGKey(0),
                   np.zeros([1, 3])),
@@ -1445,6 +1408,57 @@ def compute_TV(acc_grid):
   dz = acc_grid[:,:,:-1] - acc_grid[:,:,1:]
   TV = np.mean(np.square(dx))+np.mean(np.square(dy))+np.mean(np.square(dz))
   return TV
+
+def get_rotation_matrices(rotations):
+  cos_alpha = np.cos(rotations[:, 0])
+  cos_beta = np.cos(rotations[:, 1])
+  cos_gamma = np.cos(rotations[:, 2])
+  sin_alpha = np.sin(rotations[:, 0])
+  sin_beta = np.sin(rotations[:, 1])
+  sin_gamma = np.sin(rotations[:, 2])
+
+  col1 = np.stack([cos_alpha * cos_beta,
+                    sin_alpha * cos_beta,
+                    -sin_beta], -1)
+  col2 = np.stack([cos_alpha * sin_beta * sin_gamma - sin_alpha * cos_gamma,
+                    sin_alpha * sin_beta * sin_gamma + cos_alpha * cos_gamma,
+                    cos_beta * sin_gamma], -1)
+  col3 = np.stack([cos_alpha * sin_beta * cos_gamma + sin_alpha * sin_gamma,
+                    sin_alpha * sin_beta * cos_gamma - cos_alpha * sin_gamma,
+                    cos_beta * cos_gamma], -1)
+
+  return np.stack([col1, col2, col3], -1)
+
+def random_ray_batch(rng, batch_size, data, vars):
+  """Generate a random batch of ray data."""
+  keys = random.split(rng, 3)
+  cam_ind = random.randint(keys[0], [batch_size], 0, data['c2w'].shape[0])
+  y_ind = random.randint(keys[1], [batch_size], 0, data['images'].shape[1])
+  x_ind = random.randint(keys[2], [batch_size], 0, data['images'].shape[2])
+  pixel_coords = np.stack([x_ind, y_ind], axis=-1)
+  pix2cam = pix2cam_matrix(*data['hwf'])
+  cam2world = data['c2w'][cam_ind, :3, :4]
+  (ray_origin, ray_direction) = generate_rays(pixel_coords, pix2cam, cam2world)
+
+  if use_pose:
+    if pose_type == 'radiance':
+      output = pose_model.apply(vars[-4], ray_origin)
+      rotation_vectors = output[:, :3]
+      rotation_matrices = get_rotation_matrices(rotation_vectors)
+      translation_vectors = output[:, 3:]
+    else:
+      rotation_vectors = vars[-4][cam_ind, :3]
+      rotation_matrices = get_rotation_matrices(rotation_vectors)
+      translation_vectors = vars[-4][cam_ind, 3:]
+
+    ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
+    ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
+
+  pixels = data['images'][cam_ind, y_ind, x_ind]
+  distances = None
+  if use_depth:
+    distances = data['depths'][cam_ind, y_ind, x_ind]
+  return (ray_origin, ray_direction), pixels, distances
 
 def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
   key, rng = random.split(rng)
