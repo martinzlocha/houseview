@@ -335,13 +335,6 @@ def pix2cam_matrix(height, width, focal):
       [0, 0, -1.],
   ])
 
-def camera_ray_batch(cam2world, hwf):
-  """Generate rays for a pinhole camera with given extrinsic and intrinsic."""
-  height, width = int(hwf[0]), int(hwf[1])
-  pix2cam = pix2cam_matrix(*hwf)
-  pixel_coords = np.stack(np.meshgrid(np.arange(width), np.arange(height)), axis=-1)
-  return generate_rays(pixel_coords, pix2cam, cam2world)
-
 # Learning rate helpers.
 
 def log_lerp(t, v0, v1):
@@ -1219,11 +1212,13 @@ feature_model = RadianceField(num_bottleneck_features)
 color_model = MLP([16,16,3])
 
 if pose_type == 'radiance':
+  print('Creating radiance pose model')
   pose_model = RadianceField(6)
   pose_weights = pose_model.init(
                   jax.random.PRNGKey(0),
                   np.zeros([1, 3]))
 else:
+  print('Creating array pose model')
   num_images = data['train']['images'].shape[0]
   pose_weights = np.zeros((num_images, 6), dtype=np.float32)
 
@@ -1356,6 +1351,44 @@ def render_loop(rays, vars, chunk):
       np.concatenate([z[i] for z in outs])[:l], sh + [-1]) for i in range(4)]
   return outs
 
+def get_rotation_matrices(rotations):
+  cos_alpha = np.cos(rotations[:, 0])
+  cos_beta = np.cos(rotations[:, 1])
+  cos_gamma = np.cos(rotations[:, 2])
+  sin_alpha = np.sin(rotations[:, 0])
+  sin_beta = np.sin(rotations[:, 1])
+  sin_gamma = np.sin(rotations[:, 2])
+
+  col1 = np.stack([cos_alpha * cos_beta,
+                    sin_alpha * cos_beta,
+                    -sin_beta], -1)
+  col2 = np.stack([cos_alpha * sin_beta * sin_gamma - sin_alpha * cos_gamma,
+                    sin_alpha * sin_beta * sin_gamma + cos_alpha * cos_gamma,
+                    cos_beta * sin_gamma], -1)
+  col3 = np.stack([cos_alpha * sin_beta * cos_gamma + sin_alpha * sin_gamma,
+                    sin_alpha * sin_beta * cos_gamma - cos_alpha * sin_gamma,
+                    cos_beta * cos_gamma], -1)
+
+  return np.stack([col1, col2, col3], -1)
+
+def camera_ray_batch(cam2world, hwf, vars):
+  """Generate rays for a pinhole camera with given extrinsic and intrinsic."""
+  height, width = int(hwf[0]), int(hwf[1])
+  pix2cam = pix2cam_matrix(*hwf)
+  pixel_coords = np.stack(np.meshgrid(np.arange(width), np.arange(height)), axis=-1)
+  (ray_origin, ray_direction) = generate_rays(pixel_coords, pix2cam, cam2world)
+
+  if use_pose and pose_type == 'radiance':
+    output = jax.nn.sigmoid(pose_model.apply(vars[-4], ray_origin))
+    rotation_vectors = output[:, :3]
+    rotation_matrices = get_rotation_matrices(rotation_vectors)
+    translation_vectors = output[:, 3:]
+
+    ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
+    ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
+
+  return (ray_origin, ray_direction)
+
 def generate_test_samples(iteration, model, num=test_samples):
   num = min(num, len(data['test']['images']))
   psnrs = []
@@ -1363,7 +1396,7 @@ def generate_test_samples(iteration, model, num=test_samples):
   for i in tqdm(range(num)):
     selected_index = int(len(data['test']['images']) * i / num)
     rays = camera_ray_batch(
-      data['test']['c2w'][selected_index], data['test']['hwf'])
+      data['test']['c2w'][selected_index], data['test']['hwf'], model)
     gt = data['test']['images'][selected_index]
     out = render_loop(rays, model, test_batch_size)
     rgb = out[0]
@@ -1409,26 +1442,6 @@ def compute_TV(acc_grid):
   TV = np.mean(np.square(dx))+np.mean(np.square(dy))+np.mean(np.square(dz))
   return TV
 
-def get_rotation_matrices(rotations):
-  cos_alpha = np.cos(rotations[:, 0])
-  cos_beta = np.cos(rotations[:, 1])
-  cos_gamma = np.cos(rotations[:, 2])
-  sin_alpha = np.sin(rotations[:, 0])
-  sin_beta = np.sin(rotations[:, 1])
-  sin_gamma = np.sin(rotations[:, 2])
-
-  col1 = np.stack([cos_alpha * cos_beta,
-                    sin_alpha * cos_beta,
-                    -sin_beta], -1)
-  col2 = np.stack([cos_alpha * sin_beta * sin_gamma - sin_alpha * cos_gamma,
-                    sin_alpha * sin_beta * sin_gamma + cos_alpha * cos_gamma,
-                    cos_beta * sin_gamma], -1)
-  col3 = np.stack([cos_alpha * sin_beta * cos_gamma + sin_alpha * sin_gamma,
-                    sin_alpha * sin_beta * cos_gamma - cos_alpha * sin_gamma,
-                    cos_beta * cos_gamma], -1)
-
-  return np.stack([col1, col2, col3], -1)
-
 def random_ray_batch(rng, batch_size, data, vars):
   """Generate a random batch of ray data."""
   keys = random.split(rng, 3)
@@ -1442,7 +1455,7 @@ def random_ray_batch(rng, batch_size, data, vars):
 
   if use_pose:
     if pose_type == 'radiance':
-      output = pose_model.apply(vars[-4], ray_origin)
+      output = jax.nn.sigmoid(pose_model.apply(vars[-4], ray_origin))
       rotation_vectors = output[:, :3]
       rotation_matrices = get_rotation_matrices(rotation_vectors)
       translation_vectors = output[:, 3:]
@@ -1583,9 +1596,10 @@ for i in tqdm(range(step_init, training_iters + 1)):
     if use_depth:
       print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-200:])))
 
-    unreplicated_state = flax.jax_utils.unreplicate(state)
-    translation_vectors = unreplicated_state.target[-4][3:]
-    print("Translation correction: %0.3f" % np.mean(np.linalg.norm(translation_vectors, axis=-1)))
+    if pose_type == 'array':
+      unreplicated_state = flax.jax_utils.unreplicate(state)
+      translation_vectors = unreplicated_state.target[-4][3:]
+      print("Translation correction: %0.3f" % np.mean(np.linalg.norm(translation_vectors, axis=-1)))
 
   if (i % 10000 == 0) and i > 0:
     gc.collect()
@@ -1637,7 +1651,7 @@ frames = []
 framemasks = []
 print("Testing")
 for p in tqdm(render_poses):
-  out = render_loop(camera_ray_batch(p, hwf), unreplicated_state.target, test_batch_size)
+  out = render_loop(camera_ray_batch(p, hwf, unreplicated_state.target), unreplicated_state.target, test_batch_size)
   frames.append(out[0])
   framemasks.append(out[1])
 psnrs_test = [-10 * np.log10(np.mean(np.square(rgb - gt))) for (rgb, gt) in zip(frames, data['test']['images'])]
