@@ -1352,12 +1352,12 @@ def render_loop(rays, vars, chunk):
   return outs
 
 def get_rotation_matrices(rotations):
-  cos_alpha = np.cos(rotations[:, 0])
-  cos_beta = np.cos(rotations[:, 1])
-  cos_gamma = np.cos(rotations[:, 2])
-  sin_alpha = np.sin(rotations[:, 0])
-  sin_beta = np.sin(rotations[:, 1])
-  sin_gamma = np.sin(rotations[:, 2])
+  cos_alpha = np.cos(rotations[..., 0])
+  cos_beta = np.cos(rotations[..., 1])
+  cos_gamma = np.cos(rotations[..., 2])
+  sin_alpha = np.sin(rotations[..., 0])
+  sin_beta = np.sin(rotations[..., 1])
+  sin_gamma = np.sin(rotations[..., 2])
 
   col1 = np.stack([cos_alpha * cos_beta,
                     sin_alpha * cos_beta,
@@ -1380,9 +1380,9 @@ def camera_ray_batch(cam2world, hwf, vars):
 
   if use_pose and pose_type == 'radiance':
     output = jax.nn.sigmoid(pose_model.apply(vars[-4], ray_origin))
-    rotation_vectors = output[:, :3]
+    rotation_vectors = output[..., :3]
     rotation_matrices = get_rotation_matrices(rotation_vectors)
-    translation_vectors = output[:, 3:]
+    translation_vectors = output[..., 3:]
 
     ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
     ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
@@ -1415,7 +1415,7 @@ print('Generating test samples')
 
 # Make sure that everything works, by rendering an image from the test set
 
-# generate_test_samples(0, model_vars)
+generate_test_samples(0, model_vars)
 
 print('Generated test samples')
 
@@ -1456,9 +1456,9 @@ def random_ray_batch(rng, batch_size, data, vars):
   if use_pose:
     if pose_type == 'radiance':
       output = jax.nn.sigmoid(pose_model.apply(vars[-4], ray_origin))
-      rotation_vectors = output[:, :3]
+      rotation_vectors = output[..., :3]
       rotation_matrices = get_rotation_matrices(rotation_vectors)
-      translation_vectors = output[:, 3:]
+      translation_vectors = output[..., 3:]
     else:
       rotation_vectors = vars[-4][cam_ind, :3]
       rotation_matrices = get_rotation_matrices(rotation_vectors)
