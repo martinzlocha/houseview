@@ -32,6 +32,7 @@ use_depth = os.environ['USE_DEPTH'] == 'True'
 take_every_n = int(os.environ['TAKE_EVERY_N'])
 depth_weight = float(os.environ['DEPTH_WEIGHT'])
 use_pose = os.environ['USE_POSE'] == 'True'
+pose_weight = float(os.environ['POSE_WEIGHT'])
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -1210,7 +1211,7 @@ density_model = RadianceField(1)
 feature_model = RadianceField(num_bottleneck_features)
 color_model = MLP([16,16,3])
 
-pose_model = RadianceField(6)
+pose_model = MLP([16,16,6])
 pose_weights = pose_model.init(
                 jax.random.PRNGKey(0),
                 np.zeros([1, 6]))
@@ -1410,7 +1411,7 @@ print('Generating test samples')
 
 # Make sure that everything works, by rendering an image from the test set
 
-generate_test_samples(0, model_vars)
+# generate_test_samples(0, model_vars)
 
 print('Generated test samples')
 
@@ -1489,7 +1490,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
 
     if use_pose:
       pose_shift_magnitude = np.mean(np.abs(pose_shift))
-      loss_acc += np.mean(np.square(pose_shift)) * 1e-5
+      loss_acc += np.mean(np.square(pose_shift)) * pose_weight
 
     loss_distortion = np.mean(lossfun_distortion(fake_t, weights)) *wdistortion
 
