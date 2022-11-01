@@ -32,7 +32,6 @@ use_depth = os.environ['USE_DEPTH'] == 'True'
 take_every_n = int(os.environ['TAKE_EVERY_N'])
 depth_weight = float(os.environ['DEPTH_WEIGHT'])
 use_pose = os.environ['USE_POSE'] == 'True'
-pose_type = os.environ['POSE_TYPE'] or 'radiance'
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -1211,16 +1210,10 @@ density_model = RadianceField(1)
 feature_model = RadianceField(num_bottleneck_features)
 color_model = MLP([16,16,3])
 
-if pose_type == 'radiance':
-  print('Creating radiance pose model')
-  pose_model = RadianceField(6)
-  pose_weights = pose_model.init(
-                  jax.random.PRNGKey(0),
-                  np.zeros([1, 3]))
-else:
-  print('Creating array pose model')
-  num_images = data['train']['images'].shape[0]
-  pose_weights = np.zeros((num_images, 6), dtype=np.float32)
+pose_model = RadianceField(6)
+pose_weights = pose_model.init(
+                jax.random.PRNGKey(0),
+                np.zeros([1, 6]))
 
 # These are the variables we will be optimizing during trianing.
 model_vars = [point_grid, acc_grid,
@@ -1378,11 +1371,13 @@ def camera_ray_batch(cam2world, hwf, vars):
   pixel_coords = np.stack(np.meshgrid(np.arange(width), np.arange(height)), axis=-1)
   (ray_origin, ray_direction) = generate_rays(pixel_coords, pix2cam, cam2world)
 
-  if use_pose and pose_type == 'radiance':
-    output = jax.nn.sigmoid(pose_model.apply(vars[-4], ray_origin))
-    rotation_vectors = output[..., :3]
+  if use_pose:
+    pose_input = np.concatenate((ray_origin, ray_direction), axis=-1)
+    pose_shift = jax.numpy.tanh(pose_model.apply(vars[-4], pose_input))
+
+    rotation_vectors = pose_shift[..., :3]
     rotation_matrices = get_rotation_matrices(rotation_vectors)
-    translation_vectors = output[..., 3:]
+    translation_vectors = pose_shift[..., 3:]
 
     ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
     ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
@@ -1454,10 +1449,8 @@ def random_ray_batch(rng, batch_size, data, vars):
   (ray_origin, ray_direction) = generate_rays(pixel_coords, pix2cam, cam2world)
 
   if use_pose:
-    if pose_type == 'radiance':
-      pose_shift = jax.nn.sigmoid(pose_model.apply(vars[-4], ray_origin))
-    else:
-      pose_shift = vars[-4][cam_ind, :]
+    pose_input = np.concatenate((ray_origin, ray_direction), axis=-1)
+    pose_shift = jax.numpy.tanh(pose_model.apply(vars[-4], pose_input))
 
     rotation_vectors = pose_shift[..., :3]
     rotation_matrices = get_rotation_matrices(rotation_vectors)
@@ -1493,7 +1486,10 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
     loss_acc += np.mean(np.abs(vars[1])) * 1e-5
     loss_acc += compute_TV(vars[1]) * 1e-5
-    loss_acc += np.mean(np.square(pose_shift)) * 1e-5
+
+    if use_pose:
+      pose_shift_magnitude = np.mean(np.abs(pose_shift))
+      loss_acc += np.mean(np.square(pose_shift)) * 1e-5
 
     loss_distortion = np.mean(lossfun_distortion(fake_t, weights)) *wdistortion
 
@@ -1503,10 +1499,10 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     point_mask = point_loss<(grid_max - grid_min)/point_grid_size/2
     point_loss = np.mean(np.where(point_mask, point_loss_in, point_loss_out))
 
-    return loss_color_l2 + (dist_loss_l2 * depth_weight) + loss_distortion + loss_acc + point_loss, (loss_color_l2, dist_err)
+    return loss_color_l2 + (dist_loss_l2 * depth_weight) + loss_distortion + loss_acc + point_loss, (loss_color_l2, dist_err, pose_shift_magnitude)
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (total_loss, (color_loss_l2, dist_err)), grad = grad_fn(state.target)
+  (total_loss, (color_loss_l2, dist_err, pose_shift_magnitude)), grad = grad_fn(state.target)
   total_loss = jax.lax.pmean(total_loss, axis_name='batch')
   color_loss_l2 = jax.lax.pmean(color_loss_l2, axis_name='batch')
   dist_err = jax.lax.pmean(dist_err, axis_name='batch')
@@ -1514,7 +1510,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
   grad = jax.lax.pmean(grad, axis_name='batch')
   state = state.apply_gradient(grad, learning_rate=lr)
 
-  return state, color_loss_l2, dist_err
+  return state, color_loss_l2, dist_err, pose_shift_magnitude
 
 train_pstep = jax.pmap(train_step, axis_name='batch',
                        in_axes=(0, 0, 0, None, None, None, None, None, None, None),
@@ -1529,6 +1525,7 @@ print(f'starting at {step_init}')
 # Training loop
 psnrs = []
 dist_err_real = []
+pose_shift_magnitudes = []
 iters = []
 psnrs_test = []
 iters_test = []
@@ -1571,7 +1568,7 @@ for i in tqdm(range(step_init, training_iters + 1)):
 
   rng, key1, key2 = random.split(rng, 3)
   key2 = random.split(key2, n_device)
-  state, color_loss_l2, dist_err = train_pstep(
+  state, color_loss_l2, dist_err, pose_shift_magnitude = train_pstep(
       state, key2, traindata_p,
       lr,
       wdistortion,
@@ -1585,6 +1582,8 @@ for i in tqdm(range(step_init, training_iters + 1)):
   psnrs.append(-10. * np.log10(color_loss_l2[0]))
   if use_depth:
     dist_err_real.append(dist_err / depth_scale)
+  if use_pose:
+    pose_shift_magnitudes.append(pose_shift_magnitude)
   iters.append(i)
 
   if i > 0:
@@ -1595,11 +1594,8 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print('PSNR: %0.3f' % np.mean(np.array(psnrs[-200:])))
     if use_depth:
       print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-200:])))
-
-    if pose_type == 'array':
-      unreplicated_state = flax.jax_utils.unreplicate(state)
-      translation_vectors = unreplicated_state.target[-4][3:]
-      print("Translation correction: %0.3f" % np.mean(np.linalg.norm(translation_vectors, axis=-1)))
+    if use_pose:
+      print("Pose shift: %0.3f" % np.mean(np.array(pose_shift_magnitudes[-200:])))
 
   if (i % 10000 == 0) and i > 0:
     gc.collect()
@@ -1627,9 +1623,6 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print("PSNR:")
     print('  Training running average: %0.3f' % np.mean(np.array(psnrs[-200:])))
     print('  Selected test images: %0.3f' % psnrs_test[-1])
-
-    if use_depth:
-      print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-200:])))
 
     plt.figure()
     plt.title(i)
