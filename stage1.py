@@ -1291,6 +1291,8 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
     cum_dist = jax.lax.stop_gradient(cum_dist)
     weigheted_dist = np.sum(cum_dist * weights[:, 1:], axis=-1)
     weigheted_dist_b = np.sum(cum_dist * weights[:, 1:], axis=-1)
+    weigheted_dist /= (acc + 1e-5)
+    weigheted_dist_b /= (acc_b + 1e-5)
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1])
@@ -1312,10 +1314,6 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   #get acc_grid_masks to update acc_grid
   acc_grid_masks = get_acc_grid_masks(pts, vars[1])
   acc_grid_masks = acc_grid_masks*grid_masks
-
-  if use_depth:
-    weigheted_dist = weigheted_dist + (1. - acc) * mean_dist
-    weigheted_dist_b = weigheted_dist_b + (1. - acc_b) * mean_dist
 
   return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b
 #%% --------------------------------------------------------------------------------
