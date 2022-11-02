@@ -33,7 +33,7 @@ take_every_n = int(os.environ['TAKE_EVERY_N'])
 depth_weight = float(os.environ['DEPTH_WEIGHT'])
 use_pose = os.environ['USE_POSE'] == 'True'
 pose_weight = float(os.environ['POSE_WEIGHT'])
-distance_cutoff = flaot(os.environ['DISTANCE_CUTOFF'])
+distance_cutoff = float(os.environ['DISTANCE_CUTOFF'])
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
