@@ -33,6 +33,7 @@ take_every_n = int(os.environ['TAKE_EVERY_N'])
 depth_weight = float(os.environ['DEPTH_WEIGHT'])
 use_pose = os.environ['USE_POSE'] == 'True'
 pose_weight = float(os.environ['POSE_WEIGHT'])
+distance_cutoff = flaot(os.environ['DISTANCE_CUTOFF'])
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -266,7 +267,7 @@ for i in range(3):
 bg_color = jnp.mean(images)
 if use_depth:
   mean_dist = jnp.mean(depths)
-  depth_threshold = 3 * depth_scale
+  depth_threshold = distance_cutoff * depth_scale
   print('Depths (m):')
   print(f'  25% - {jnp.percentile(depths, 25) / depth_scale}')
   print(f'  50% - {jnp.percentile(depths, 50) / depth_scale}')
@@ -1486,11 +1487,11 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
 
     dist_loss_l2 = 0
     if use_depth:
-      distance_difference = distances - weigheted_dist
       depth_mask = np.where(distances > depth_threshold, 0, 1)
       num_all = depth_mask.size
       num_valid = np.count_nonzero(depth_mask)
       depth_valid_weight = num_all / (num_valid + 1e-5)
+      distance_difference = distances - weigheted_dist
       filtered_difference = np.where(distances > depth_threshold, 0, distance_difference)
       dist_loss_l2 = np.mean(np.square(filtered_difference)) * depth_valid_weight
       dist_err = np.mean(np.abs(filtered_difference)) * depth_valid_weight
