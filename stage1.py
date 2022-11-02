@@ -44,8 +44,6 @@ pose_weight = float(os.environ['POSE_WEIGHT'])
 # bicycle flowerbed gardenvase stump treehill
 # fulllivingroom kitchencounter kitchenlego officebonsai
 
-depth_scale = 1
-
 print(jax.local_devices())
 if not os.path.exists(weights_dir):
   os.makedirs(weights_dir)
@@ -212,8 +210,8 @@ def load_LLFF(data_dir, factor = 4, llffhold = 8):
 
   # Rotate/scale poses to align ground with xy plane and fit to unit cube.
   poses, _, scale = _transform_poses_pca(poses)
+  depth_scale = scale
   if use_depth:
-    depth_scale = scale
     depths *= scale
 
   # Select the split.
@@ -244,9 +242,9 @@ def load_LLFF(data_dir, factor = 4, llffhold = 8):
   if use_depth:
     data['train']['depths'] = train_depths
     data['test']['depths'] = test_depths
-  return data
+  return data, depth_scale
 
-data = load_LLFF(scene_dir, factor)
+data, depth_scale = load_LLFF(scene_dir, factor)
 
 splits = ['train', 'test']
 for s in splits:
@@ -268,12 +266,15 @@ for i in range(3):
 bg_color = jnp.mean(images)
 if use_depth:
   mean_dist = jnp.mean(depths)
-  print('Depths:')
-  print(f'  25% - {jnp.percentile(depths, 25)}')
-  print(f'  50% - {jnp.percentile(depths, 50)}')
-  print(f'  75% - {jnp.percentile(depths, 75)}')
-  print(f'  90% - {jnp.percentile(depths, 90)}')
-  print(f'  95% - {jnp.percentile(depths, 95)}')
+  depth_threshold = 3 * depth_scale
+  print('Depths (m):')
+  print(f'  25% - {jnp.percentile(depths, 25) / depth_scale}')
+  print(f'  50% - {jnp.percentile(depths, 50) / depth_scale}')
+  print(f'  75% - {jnp.percentile(depths, 75) / depth_scale}')
+  print(f'  90% - {jnp.percentile(depths, 90) / depth_scale}')
+  print(f'  95% - {jnp.percentile(depths, 95) / depth_scale}')
+  print(f'  99% - {jnp.percentile(depths, 99) / depth_scale}')
+  print(f'Depth scale: {depth_scale}')
 
 import jax.numpy as np
 
@@ -1487,8 +1488,14 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
 
     dist_loss_l2 = 0
     if use_depth:
-      dist_loss_l2 = np.mean(np.square(distances - weigheted_dist))
-      dist_err = np.mean(np.abs(distances - weigheted_dist))
+      distance_difference = distances - weigheted_dist
+      depth_mask = np.where(distances > depth_threshold, 0, 1)
+      num_all = depth_mask.size
+      num_valid = np.count_nonzero(depth_mask)
+      depth_valid_weight = num_all / num_valid
+      filtered_difference = np.where(distances > depth_threshold, 0, distance_difference)
+      dist_loss_l2 = np.mean(np.square(filtered_difference)) * depth_valid_weight
+      dist_err = np.mean(np.abs(filtered_difference)) * depth_valid_weight
 
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
     loss_acc += np.mean(np.abs(vars[1])) * 1e-5
