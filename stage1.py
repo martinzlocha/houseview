@@ -1492,7 +1492,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
       depth_mask = np.where(distances > depth_threshold, 0, 1)
       num_all = depth_mask.size
       num_valid = np.count_nonzero(depth_mask)
-      depth_valid_weight = num_all / num_valid
+      depth_valid_weight = num_all / (num_valid + 1e-5)
       filtered_difference = np.where(distances > depth_threshold, 0, distance_difference)
       dist_loss_l2 = np.mean(np.square(filtered_difference)) * depth_valid_weight
       dist_err = np.mean(np.abs(filtered_difference)) * depth_valid_weight
