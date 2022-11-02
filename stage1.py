@@ -268,6 +268,12 @@ for i in range(3):
 bg_color = jnp.mean(images)
 if use_depth:
   mean_dist = jnp.mean(depths)
+  print('Depths:')
+  print(f'  25% - {jnp.percentile(depths, 25)}')
+  print(f'  50% - {jnp.percentile(depths, 50)}')
+  print(f'  75% - {jnp.percentile(depths, 75)}')
+  print(f'  90% - {jnp.percentile(depths, 90)}')
+  print(f'  95% - {jnp.percentile(depths, 95)}')
 
 import jax.numpy as np
 
