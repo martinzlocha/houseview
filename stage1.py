@@ -1501,10 +1501,6 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
       dist_loss_l2 = np.mean(np.square(filtered_difference)) * depth_valid_weight
       dist_err = np.mean(np.abs(filtered_difference)) * depth_valid_weight
 
-      near_mask = np.where(cum_dist < distances[..., None] - 0.1, 1, 0)
-      dist_loss_l2 += np.mean(np.square(mlp_alpha * near_mask))
-      dist_err += np.mean(np.square(mlp_alpha * near_mask))
-
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
     loss_acc += np.mean(np.abs(vars[1])) * 1e-5
     loss_acc += compute_TV(vars[1]) * 1e-5
