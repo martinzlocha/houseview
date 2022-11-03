@@ -1284,16 +1284,19 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   acc_b = np.sum(weights_b, axis=-1)
 
   weigheted_dist = None
-  weigheted_dist_b = None
 
   if use_depth:
     pts_dist = np.linalg.norm(pts[:, 1:, :] - pts[:, :-1, :], axis=-1)
     cum_dist = np.nancumsum(pts_dist, axis=-1)
     cum_dist = jax.lax.stop_gradient(cum_dist)
-    weigheted_dist = np.sum(cum_dist * weights[:, 1:], axis=-1)
-    weigheted_dist_b = np.sum(cum_dist * weights[:, 1:], axis=-1)
-    weigheted_dist /= (acc + 1e-5)
-    weigheted_dist_b /= (acc_b + 1e-5)
+
+    cum_weights = np.cumsum(weights, axis=-1)
+    weight_mask = np.where(cum_weights > 1, 0, 1)
+    masked_weights = weights * weight_mask
+    masked_acc = np.sum(masked_weights, axis=-1)
+
+    weigheted_dist = np.sum(cum_dist * masked_weights[:, 1:], axis=-1)
+    weigheted_dist /= (masked_acc + 1e-5)
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1])
@@ -1316,7 +1319,7 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   acc_grid_masks = get_acc_grid_masks(pts, vars[1])
   acc_grid_masks = acc_grid_masks*grid_masks
 
-  return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b
+  return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist
 #%% --------------------------------------------------------------------------------
 # ## Set up pmap'd rendering for test time evaluation.
 #%%
@@ -1479,7 +1482,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     rays, pixels, distances, pose_shift = random_ray_batch(
         key, batch_size // n_device, traindata, vars)
 
-    rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b = render_rays(
+    rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist = render_rays(
         rays, vars, keep_num, threshold, wbgcolor, rng)
 
     loss_color_l2 = np.mean(np.square(rgb_est - pixels))
