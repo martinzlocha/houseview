@@ -266,7 +266,7 @@ for i in range(3):
 
 bg_color = jnp.mean(images)
 if use_depth:
-  mean_dist = jnp.mean(depths)
+  mean_dist = jnp.percentile(depths, 95)
   depth_threshold = distance_cutoff * depth_scale
   print('Depths (m):')
   print(f'  25% - {jnp.percentile(depths, 25) / depth_scale}')
@@ -1285,18 +1285,16 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
 
   weigheted_dist = None
   if use_depth:
-    pts_dist = np.linalg.norm(pts[:, 1:, :] - pts[:, :-1, :], axis=-1)
-    cum_dist = np.nancumsum(pts_dist, axis=-1)
-    cum_dist = jax.lax.stop_gradient(cum_dist)
+    dist = np.linalg.norm(pts - rays[0][:, None, :], axis=-1)
+    dist = jax.lax.stop_gradient(dist)
 
     cum_alpha = np.cumsum(mlp_alpha, axis=-1)
-    alpha_mask = np.where(cum_alpha > 1, 0, 1)
-    alpha_mask = jax.lax.stop_gradient(alpha_mask)
-    masked_alpha = mlp_alpha * alpha_mask
+    clipped_alpha = np.clip(cum_alpha, 0, 1)
+    alpha_change = np.diff(clipped_alpha, n=1, axis=-1, prepend=0)
 
-    weigheted_dist = np.sum(cum_dist * masked_alpha[:, 1:], axis=-1)
-    masked_acc = np.sum(masked_alpha, axis=-1)
-    weigheted_dist /= (masked_acc + 1e-5)
+    weigheted_dist = np.sum(dist * alpha_change, axis=-1)
+    change_acc = np.sum(alpha_change, axis=-1)
+    weigheted_dist += (1. - change_acc) * mean_dist
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1])
@@ -1319,7 +1317,7 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   acc_grid_masks = get_acc_grid_masks(pts, vars[1])
   acc_grid_masks = acc_grid_masks*grid_masks
 
-  return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, cum_dist
+  return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, dist
 #%% --------------------------------------------------------------------------------
 # ## Set up pmap'd rendering for test time evaluation.
 #%%
@@ -1490,16 +1488,8 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
 
     dist_loss_l2 = 0
     if use_depth:
-      depth_mask = np.where(distances < depth_threshold, 1, 0)
-      num_all = depth_mask.size
-      num_valid = np.count_nonzero(depth_mask)
-      depth_valid_weight = num_all / (num_valid + 1e-5)
-
-      distance_difference = distances - weigheted_dist
-      filtered_difference = distance_difference * depth_mask
-
-      dist_loss_l2 = np.mean(np.square(filtered_difference)) * depth_valid_weight
-      dist_err = np.mean(np.abs(filtered_difference)) * depth_valid_weight
+      dist_loss_l2 = np.mean(np.square(distances - weigheted_dist))
+      dist_err = np.mean(np.abs(distances - weigheted_dist))
 
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
     loss_acc += np.mean(np.abs(vars[1])) * 1e-5
