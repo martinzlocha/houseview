@@ -1203,6 +1203,25 @@ class RadianceField(nn.Module):
 
     return net
 
+class DeepMLP(nn.Module):
+  out_dim: int
+  trunk_width: int = 384
+  trunk_depth: int = 8
+  trunk_skip_length: int = 4
+  network_activation: Callable = nn.relu
+  @nn.compact
+  def __call__(self, inputs):
+    net = inputs
+    for i in range(self.trunk_depth):
+      net = dense_layer(self.trunk_width)(net)
+      net = self.network_activation(net)
+      if i % self.trunk_skip_length == 0 and i > 0:
+        net = np.concatenate([net, inputs], axis=-1)
+
+    net = dense_layer(self.out_dim)(net)
+
+    return net
+
 # Set up the MLPs for color and density.
 class MLP(nn.Module):
   features: Sequence[int]
@@ -1219,7 +1238,7 @@ density_model = RadianceField(1)
 feature_model = RadianceField(num_bottleneck_features)
 color_model = MLP([16,16,3])
 
-pose_model = MLP([384,384,384,384,6])
+pose_model = DeepMLP(6)
 pose_weights = pose_model.init(
                 jax.random.PRNGKey(0),
                 np.zeros([1, 6]))
