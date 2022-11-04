@@ -1206,8 +1206,7 @@ class RadianceField(nn.Module):
 class DeepMLP(nn.Module):
   out_dim: int
   trunk_width: int = 384
-  trunk_depth: int = 8
-  trunk_skip_length: int = 4
+  trunk_depth: int = 4
   network_activation: Callable = nn.relu
   @nn.compact
   def __call__(self, inputs):
@@ -1215,8 +1214,6 @@ class DeepMLP(nn.Module):
     for i in range(self.trunk_depth):
       net = dense_layer(self.trunk_width)(net)
       net = self.network_activation(net)
-      if i % self.trunk_skip_length == 0 and i > 0:
-        net = np.concatenate([net, inputs], axis=-1)
 
     net = dense_layer(self.out_dim)(net)
 
