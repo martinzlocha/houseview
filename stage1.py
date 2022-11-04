@@ -1494,7 +1494,8 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     rays, pixels, distances, pose_shift = random_ray_batch(
         key, batch_size // n_device, traindata, vars)
 
-    rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, cum_dist = render_rays(
+    render_rays_jit = jax.jit(render_rays, static_argnames=['keep_num'])
+    rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, cum_dist = render_rays_jit(
         rays, vars, keep_num, threshold, wbgcolor, rng)
 
     loss_color_l2 = np.mean(np.square(rgb_est - pixels))
