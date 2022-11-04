@@ -1559,8 +1559,6 @@ i_last = step_init
 
 training_iters = 200000
 train_iters_cont = 300000
-if scene_type=="real360":
-  training_iters = 300000
 
 print("Training")
 for i in tqdm(range(step_init, training_iters + 1)):
