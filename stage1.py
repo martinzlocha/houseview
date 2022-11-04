@@ -1503,8 +1503,16 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
 
     dist_loss_l2 = 0
     if use_depth:
-      dist_loss_l2 = np.mean(np.square(distances - weigheted_dist))
-      dist_err = np.mean(np.abs(distances - weigheted_dist))
+      dist_filter = np.where(distances > 2.5, 0, 1)
+      total_filter = dist_filter.size
+      non_zero_filter = np.count_nonzero(dist_filter)
+      non_zero_ratio = non_zero_filter / total_filter
+
+      dist_diff = distances - weigheted_dist
+      dist_diff = dist_diff * dist_filter
+
+      dist_loss_l2 = np.mean(np.square(dist_diff)) / non_zero_ratio
+      dist_err = np.mean(np.abs(dist_diff)) / non_zero_ratio
 
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
     loss_acc += np.mean(np.abs(vars[1])) * 1e-5
