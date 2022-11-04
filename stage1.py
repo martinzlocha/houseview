@@ -1219,7 +1219,7 @@ density_model = RadianceField(1)
 feature_model = RadianceField(num_bottleneck_features)
 color_model = MLP([16,16,3])
 
-pose_model = MLP([16,16,6])
+pose_model = MLP([384,384,384,384,6])
 pose_weights = pose_model.init(
                 jax.random.PRNGKey(0),
                 np.zeros([1, 6]))
