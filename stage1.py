@@ -33,7 +33,11 @@ take_every_n = int(os.environ['TAKE_EVERY_N'])
 depth_weight = float(os.environ['DEPTH_WEIGHT'])
 use_pose = os.environ['USE_POSE'] == 'True'
 pose_weight = float(os.environ['POSE_WEIGHT'])
-distance_cutoff = float(os.environ['DISTANCE_CUTOFF'])
+use_tpu = os.environ['USE_TPU'] == 'True'
+
+if use_tpu:
+  import jax.tools.colab_tpu
+  jax.tools.colab_tpu.setup_tpu()
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -267,7 +271,6 @@ for i in range(3):
 bg_color = jnp.mean(images)
 if use_depth:
   mean_dist = jnp.percentile(depths, 95)
-  depth_threshold = distance_cutoff * depth_scale
   print('Depths (m):')
   print(f'  25% - {jnp.percentile(depths, 25) / depth_scale}')
   print(f'  50% - {jnp.percentile(depths, 50) / depth_scale}')
