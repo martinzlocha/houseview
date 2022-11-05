@@ -1437,6 +1437,7 @@ def camera_ray_batch(cam2world, hwf): ### antialiasing by supersampling
 
 # Make sure that everything works, by rendering an image from the test set
 
+selected_test_index = 0
 rays = camera_ray_batch(
     data['test']['c2w'][selected_test_index], data['test']['hwf'])
 gt = data['test']['images'][selected_test_index]
