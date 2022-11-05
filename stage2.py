@@ -1438,19 +1438,19 @@ def camera_ray_batch(cam2world, hwf): ### antialiasing by supersampling
 # Make sure that everything works, by rendering an image from the test set
 
 selected_test_index = 0
-rays = camera_ray_batch(
-    data['test']['c2w'][selected_test_index], data['test']['hwf'])
-gt = data['test']['images'][selected_test_index]
-out = render_loop(rays, model_vars, test_batch_size)
-rgb = out[0]
-acc = out[1]
-rgb_b = out[2]
-acc_b = out[3]
-write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_rgb.png",rgb)
-write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_rgb_binarized.png",rgb_b)
-write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_gt.png",gt)
-write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_acc.png",acc)
-write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_acc_binarized.png",acc_b)
+# rays = camera_ray_batch(
+#     data['test']['c2w'][selected_test_index], data['test']['hwf'])
+# gt = data['test']['images'][selected_test_index]
+# out = render_loop(rays, model_vars, test_batch_size)
+# rgb = out[0]
+# acc = out[1]
+# rgb_b = out[2]
+# acc_b = out[3]
+# write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_rgb.png",rgb)
+# write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_rgb_binarized.png",rgb_b)
+# write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_gt.png",gt)
+# write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_acc.png",acc)
+# write_floatpoint_image(samples_dir+"/s2_0_"+str(0)+"_acc_binarized.png",acc_b)
 #%% --------------------------------------------------------------------------------
 # ## Training loop
 #%%
@@ -1889,15 +1889,15 @@ def render_loop(rays, vars, chunk): ### antialiasing by supersampling
 
 # Make sure that everything works, by rendering an image from the test set
 
-rays = camera_ray_batch(
-    data['test']['c2w'][selected_test_index], data['test']['hwf'])
-gt = data['test']['images'][selected_test_index]
-out = render_loop(rays, model_vars, test_batch_size)
-rgb_b = out[0]
-acc_b = out[1]
-write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_rgb_binarized.png",rgb_b)
-write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_gt.png",gt)
-write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_acc_binarized.png",acc_b)
+# rays = camera_ray_batch(
+#     data['test']['c2w'][selected_test_index], data['test']['hwf'])
+# gt = data['test']['images'][selected_test_index]
+# out = render_loop(rays, model_vars, test_batch_size)
+# rgb_b = out[0]
+# acc_b = out[1]
+# write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_rgb_binarized.png",rgb_b)
+# write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_gt.png",gt)
+# write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_acc_binarized.png",acc_b)
 #%% --------------------------------------------------------------------------------
 # ## Training loop
 #%%
