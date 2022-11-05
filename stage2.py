@@ -1294,7 +1294,7 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng): ### antialiasin
   weigheted_dist = None
   weigheted_dist_b = None
   if use_depth:
-    dist = np.linalg.norm(pts - rays[0][:, None, None, :], axis=-1)
+    dist = np.linalg.norm(pts - rays[0][:, :, None, :], axis=-1)
     dist = jax.lax.stop_gradient(dist)
 
     cum_alpha = np.cumsum(mlp_alpha, axis=-1)
