@@ -1380,9 +1380,12 @@ def generate_rays(pixel_coords, pix2cam, cam2world):
   cam_dirs = matmul(pix2cam, pixel_dirs)
   ray_dirs = matmul(cam2world[..., :3, :3], cam_dirs)[..., 0]
   ray_origins = np.broadcast_to(cam2world[..., :3, 3], ray_dirs.shape)
+
   #f = 1./pix2cam[0,0]
   #w = -2. * f * pix2cam[0,2]
   #h =  2. * f * pix2cam[1,2]
+
+  return ray_origins, ray_dirs
 
 def camera_ray_batch(cam2world, hwf): ### antialiasing by supersampling
   """Generate rays for a pinhole camera with given extrinsic and intrinsic."""
