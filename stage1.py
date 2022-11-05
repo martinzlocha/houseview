@@ -320,20 +320,6 @@ def sinusoidal_encoding(position, minimum_frequency_power,
 
 # Pose/ray math.
 
-def generate_rays(pixel_coords, pix2cam, cam2world):
-  """Generate camera rays from pixel coordinates and poses."""
-  homog = np.ones_like(pixel_coords[..., :1])
-  pixel_dirs = np.concatenate([pixel_coords + .5, homog], axis=-1)[..., None]
-  cam_dirs = matmul(pix2cam, pixel_dirs)
-  ray_dirs = matmul(cam2world[..., :3, :3], cam_dirs)[..., 0]
-  ray_origins = np.broadcast_to(cam2world[..., :3, 3], ray_dirs.shape)
-
-  #f = 1./pix2cam[0,0]
-  #w = -2. * f * pix2cam[0,2]
-  #h =  2. * f * pix2cam[1,2]
-
-  return ray_origins, ray_dirs
-
 def pix2cam_matrix(height, width, focal):
   """Inverse intrinsic matrix for a pinhole camera."""
   return  np.array([
@@ -1386,6 +1372,20 @@ def get_rotation_matrices(rotations):
                     cos_beta * cos_gamma], -1)
 
   return np.stack([col1, col2, col3], -1)
+
+def generate_rays(pixel_coords, pix2cam, cam2world):
+  """Generate camera rays from pixel coordinates and poses."""
+  homog = np.ones_like(pixel_coords[..., :1])
+  pixel_dirs = np.concatenate([pixel_coords + .5, homog], axis=-1)[..., None]
+  cam_dirs = matmul(pix2cam, pixel_dirs)
+  ray_dirs = matmul(cam2world[..., :3, :3], cam_dirs)[..., 0]
+  ray_origins = np.broadcast_to(cam2world[..., :3, 3], ray_dirs.shape)
+
+  #f = 1./pix2cam[0,0]
+  #w = -2. * f * pix2cam[0,2]
+  #h =  2. * f * pix2cam[1,2]
+
+  return ray_origins, ray_dirs
 
 def camera_ray_batch(cam2world, hwf, vars):
   """Generate rays for a pinhole camera with given extrinsic and intrinsic."""
