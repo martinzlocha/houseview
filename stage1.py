@@ -1411,7 +1411,7 @@ def generate_test_samples(iteration, model, num=test_samples):
   num = min(num, len(data['test']['images']))
   psnrs = []
 
-  for i in tqdm(range(num)):
+  for i in tqdm(range(num)):#
     selected_index = int(len(data['test']['images']) * i / num)
     rays = camera_ray_batch(
       data['test']['c2w'][selected_index], data['test']['hwf'], model)

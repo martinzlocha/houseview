@@ -1413,18 +1413,6 @@ def camera_ray_batch(cam2world, hwf): ### antialiasing by supersampling
 
 # Make sure that everything works, by rendering an image from the test set
 
-if scene_type=="synthetic":
-  selected_test_index = 97
-  preview_image_height = 800
-
-elif scene_type=="forwardfacing":
-  selected_test_index = 0
-  preview_image_height = 756//2
-
-elif scene_type=="real360":
-  selected_test_index = 0
-  preview_image_height = 840//2
-
 rays = camera_ray_batch(
     data['test']['c2w'][selected_test_index], data['test']['hwf'])
 gt = data['test']['images'][selected_test_index]
@@ -1851,18 +1839,6 @@ def render_loop(rays, vars, chunk): ### antialiasing by supersampling
   return outs
 
 # Make sure that everything works, by rendering an image from the test set
-
-if scene_type=="synthetic":
-  selected_test_index = 97
-  preview_image_height = 800
-
-elif scene_type=="forwardfacing":
-  selected_test_index = 0
-  preview_image_height = 756//2
-
-elif scene_type=="real360":
-  selected_test_index = 0
-  preview_image_height = 840//2
 
 rays = camera_ray_batch(
     data['test']['c2w'][selected_test_index], data['test']['hwf'])
