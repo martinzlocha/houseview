@@ -1301,7 +1301,6 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   weigheted_dist = None
   if use_depth:
     dist = np.linalg.norm(pts - rays[0][:, None, :], axis=-1)
-    dist = jax.lax.stop_gradient(dist)
 
     cum_alpha = np.cumsum(mlp_alpha, axis=-1)
     clipped_alpha = np.clip(cum_alpha, 0, 1)
