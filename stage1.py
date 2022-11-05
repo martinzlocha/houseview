@@ -33,6 +33,7 @@ take_every_n = int(os.environ['TAKE_EVERY_N'])
 depth_weight = float(os.environ['DEPTH_WEIGHT'])
 use_pose = os.environ['USE_POSE'] == 'True'
 pose_weight = float(os.environ['POSE_WEIGHT'])
+grid_dimension = int(os.environ['GRID_DIMENSION'])
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -371,7 +372,7 @@ if scene_type=="synthetic":
     scene_grid_scale = 1.5
   grid_min = np.array([-1, -1, -1]) * scene_grid_scale
   grid_max = np.array([ 1,  1,  1]) * scene_grid_scale
-  point_grid_size = 128
+  point_grid_size = grid_dimension
 
   def get_taper_coord(p):
     return p
@@ -385,7 +386,7 @@ elif scene_type=="forwardfacing":
   scene_grid_scale = 0.7
   grid_min = np.array([-scene_grid_scale, -scene_grid_scale,  0])
   grid_max = np.array([ scene_grid_scale,  scene_grid_scale,  1])
-  point_grid_size = 128
+  point_grid_size = grid_dimension
 
   def get_taper_coord(p):
     pz = np.maximum(-p[..., 2:3],1e-10)
@@ -408,7 +409,7 @@ elif scene_type=="real360":
     scene_grid_zmax = 9.0
   grid_min = np.array([-1, -1, -1])
   grid_max = np.array([ 1,  1,  1])
-  point_grid_size = 128
+  point_grid_size = grid_dimension
 
   def get_taper_coord(p):
     return p
