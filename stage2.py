@@ -1582,6 +1582,9 @@ for i in tqdm(range(step_init, training_iters + 1)):
     t_total += time.time() - t
 
   # Logging
+  if (i % 1000 == 0) and i > 0:
+    print('PSNR: %0.3f' % np.mean(np.array(psnrs[-200:])))
+
   if (i % 10000 == 0) and i > 0:
     this_train_psnr = np.mean(np.array(psnrs[-5000:]))
 
@@ -1935,6 +1938,9 @@ for i in tqdm(range(step_init, training_iters + 1)):
     t_total += time.time() - t
 
   # Logging
+  if (i % 1000 == 0) and i > 0:
+    print('PSNR: %0.3f' % np.mean(np.array(psnrs[-200:])))
+
   if (i % 10000 == 0) and i > 0:
     this_train_psnr = np.mean(np.array(psnrs[-5000:]))
     gc.collect()
