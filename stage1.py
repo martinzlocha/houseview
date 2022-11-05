@@ -1759,8 +1759,12 @@ def compute_ssim(img0,
 ssim_fn = jax.jit(
     functools.partial(compute_ssim, max_val=1.), backend="cpu")
 
+random_indices = list(range(len(data['test']['images'])))
+if len(data['test']['images']) > 40:
+  random_indices = random.sample(random_indices, 40)
+
 ssim_values = []
-for i in range(len(data['test']['images'])):
+for i in random_indices:
   ssim = ssim_fn(frames[i], data['test']['images'][i])
   ssim_values.append(float(ssim))
 
