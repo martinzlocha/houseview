@@ -1630,9 +1630,6 @@ for i in tqdm(range(step_init, training_iters + 1)):
   if (i % 10000 == 0) and i > 0:
     gc.collect()
 
-    unreplicated_state = flax.jax_utils.unreplicate(state)
-    pickle.dump(unreplicated_state, open(weights_dir+"/s1_"+"tmp_state"+str(i)+".pkl", "wb"))
-
     print('Current iteration %d, elapsed training time: %d min %d sec.'
           % (i, t_total // 60, int(t_total) % 60))
 
@@ -1646,7 +1643,14 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print('  %0.3f secs per iter.' % (t_elapsed / i_elapsed))
     print('  %0.3f iters per sec.' % (i_elapsed / t_elapsed))
 
-    test_psnr = generate_test_samples(i, unreplicated_state.target)
+    unreplicated_state = flax.jax_utils.unreplicate(state)
+
+    if (i % 50000 == 0):
+      test_psnr = generate_test_samples(i, unreplicated_state.target)
+      pickle.dump(unreplicated_state, open(weights_dir+"/s1_"+"tmp_state"+str(i)+".pkl", "wb"))
+    elif (i % 10000 == 0):
+      test_psnr = generate_test_samples(i, unreplicated_state.target, num=1)
+    
     psnrs_test.append(test_psnr)
     iters_test.append(i)
 
