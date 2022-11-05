@@ -1276,14 +1276,6 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   mlp_alpha = jax.nn.sigmoid(mlp_alpha[..., 0]-8)
   mlp_alpha = mlp_alpha * grid_masks
 
-  weights = compute_volumetric_rendering_weights_with_alpha(mlp_alpha)
-  acc = np.sum(weights, axis=-1)
-
-  mlp_alpha_b = mlp_alpha + jax.lax.stop_gradient(
-    np.clip((mlp_alpha>0.5).astype(mlp_alpha.dtype), 0.00001,0.99999) - mlp_alpha)
-  weights_b = compute_volumetric_rendering_weights_with_alpha(mlp_alpha_b)
-  acc_b = np.sum(weights_b, axis=-1)
-
   weigheted_dist = None
   if use_depth:
     dist = np.linalg.norm(pts - rays[0][:, None, :], axis=-1)
@@ -1296,6 +1288,14 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
     weigheted_dist = np.sum(dist * alpha_change, axis=-1)
     change_acc = np.sum(alpha_change, axis=-1)
     weigheted_dist += (1. - change_acc) * mean_dist
+
+  weights = compute_volumetric_rendering_weights_with_alpha(mlp_alpha)
+  acc = np.sum(weights, axis=-1)
+
+  mlp_alpha_b = mlp_alpha + jax.lax.stop_gradient(
+    np.clip((mlp_alpha>0.5).astype(mlp_alpha.dtype), 0.00001,0.99999) - mlp_alpha)
+  weights_b = compute_volumetric_rendering_weights_with_alpha(mlp_alpha_b)
+  acc_b = np.sum(weights_b, axis=-1)
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1])
@@ -1411,7 +1411,7 @@ def generate_test_samples(iteration, model, num=test_samples):
   num = min(num, len(data['test']['images']))
   psnrs = []
 
-  for i in tqdm(range(num)):#
+  for i in tqdm(range(num)):
     selected_index = int(len(data['test']['images']) * i / num)
     rays = camera_ray_batch(
       data['test']['c2w'][selected_index], data['test']['hwf'], model)

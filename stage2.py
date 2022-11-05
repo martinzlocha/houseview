@@ -1291,6 +1291,30 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng): ### antialiasin
   acc_b = np.sum(weights_b, axis=-1) #[N,4]
   acc_b = np.mean(acc_b, axis=-1) #[N]
 
+  weigheted_dist = None
+  weigheted_dist_b = None
+  if use_depth:
+    dist = np.linalg.norm(pts - rays[0][:, None, None, :], axis=-1)
+    dist = jax.lax.stop_gradient(dist)
+
+    cum_alpha = np.cumsum(mlp_alpha, axis=-1)
+    clipped_alpha = np.clip(cum_alpha, 0, 1)
+    alpha_change = np.diff(clipped_alpha, n=1, axis=-1, prepend=0)
+
+    weigheted_dist = np.sum(dist * alpha_change, axis=-1)
+    change_acc = np.sum(alpha_change, axis=-1)
+    weigheted_dist += (1. - change_acc) * mean_dist
+    weigheted_dist = np.mean(weigheted_dist, axis=-1)
+
+    cum_alpha_b = np.cumsum(mlp_alpha_b, axis=-1)
+    clipped_alpha_b = np.clip(cum_alpha_b, 0, 1)
+    alpha_change_b = np.diff(clipped_alpha_b, n=1, axis=-1, prepend=0)
+
+    weigheted_dist_b = np.sum(dist * alpha_change_b, axis=-1)
+    change_acc_b = np.sum(alpha_change_b, axis=-1)
+    weigheted_dist_b += (1. - change_acc_b) * mean_dist
+    weigheted_dist_b = np.mean(weigheted_dist_b, axis=-1)
+
   #deferred features
   mlp_features_ = jax.nn.sigmoid(feature_model.apply(vars[-2], pts)) #[N,4,P,C]
   mlp_features = np.sum(weights[..., None] * mlp_features_, axis=-2) #[N,4,C]
@@ -1317,7 +1341,7 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng): ### antialiasin
   acc_grid_masks = get_acc_grid_masks(pts, vars[1])
   acc_grid_masks = acc_grid_masks*grid_masks
 
-  return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks
+  return rgb, acc, rgb_b, acc_b, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b
 #%% --------------------------------------------------------------------------------
 # ## Set up pmap'd rendering for test time evaluation.
 #%%
@@ -1480,21 +1504,42 @@ def random_ray_batch(rng, batch_size, data): ### antialiasing by supersampling
     ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
 
   pixels = data['images'][cam_ind, y_ind, x_ind]
-  return (ray_origin, ray_direction), pixels
+  distances = None
+  if use_depth:
+    distances = data['depths'][cam_ind, y_ind, x_ind]
+  return (ray_origin, ray_direction), pixels, distances
 
 def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
   key, rng = random.split(rng)
-  rays, pixels = random_ray_batch(
+  rays, pixels, distances = random_ray_batch(
       key, batch_size // n_device, traindata)
 
   def loss_fn(vars):
-    rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks = render_rays(
+    rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, weigheted_dist_b = render_rays(
         rays, vars, keep_num, threshold, wbgcolor, rng)
 
     loss_color_l2_ = np.mean(np.square(rgb_est - pixels))
     loss_color_l2 = loss_color_l2_ * (1-wbinary)
     loss_color_l2_b_ = np.mean(np.square(rgb_est_b - pixels))
     loss_color_l2_b = loss_color_l2_b_ * wbinary
+
+    dist_loss_l2 = 0
+    dist_loss_l2_b = 0
+    if use_depth:
+      dist_filter = np.where(distances > 2.5, 0, 1)
+      total_filter = dist_filter.size
+      non_zero_filter = np.count_nonzero(dist_filter)
+      non_zero_ratio = non_zero_filter / total_filter
+
+      dist_diff = distances - weigheted_dist
+      dist_diff = dist_diff * dist_filter
+      dist_loss_l2 = np.mean(np.square(dist_diff)) / non_zero_ratio
+      dist_loss_l2 = dist_loss_l2 * (1-wbinary)
+
+      dist_diff_b = distances - weigheted_dist_b
+      dist_diff_b = dist_diff_b * dist_filter
+      dist_loss_l2_b = np.mean(np.square(dist_diff_b)) / non_zero_ratio
+      dist_loss_l2_b = dist_loss_l2_b * wbinary
 
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
     loss_acc += np.mean(np.abs(vars[1])) *1e-5
@@ -1508,7 +1553,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     point_mask = point_loss<(grid_max - grid_min)/point_grid_size/2
     point_loss = np.mean(np.where(point_mask, point_loss_in, point_loss_out))
 
-    return loss_color_l2 + loss_color_l2_b + loss_distortion + loss_acc + point_loss, loss_color_l2_b_
+    return loss_color_l2 + loss_color_l2_b + (dist_loss_l2 * depth_weight) + (dist_loss_l2_b * depth_weight) + loss_distortion + loss_acc + point_loss, loss_color_l2_b_
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (total_loss, color_loss_l2), grad = grad_fn(state.target)
@@ -1857,7 +1902,7 @@ write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_acc_binarized.png",acc_b)
 #%%
 def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
   key, rng = random.split(rng)
-  rays, pixels, distances, pose_shift = random_ray_batch(
+  rays, pixels, distances = random_ray_batch(
       key, batch_size // n_device, traindata)
 
   def loss_fn(vars):
