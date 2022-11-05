@@ -13,7 +13,6 @@ from jax import random
 import flax
 import flax.linen as nn
 import functools
-import math
 from typing import Sequence, Callable
 import time
 import matplotlib.pyplot as plt
@@ -26,7 +25,15 @@ scene_dir = os.environ['SCENE_DIR'] + '/' + object_name
 output_dir = os.environ['OUTPUT_DIR'] + '/' + object_name
 weights_dir = output_dir + '/' + "weights"
 samples_dir = output_dir + '/' + "samples"
-factor = int(os.environ['FACTOR']) or 4
+factor = int(os.environ['FACTOR'])
+image_dtype = np.float16 if os.environ['DTYPE'] == '16' else np.float32
+test_samples = int(os.environ['TEST_SAMPLES'])
+use_depth = os.environ['USE_DEPTH'] == 'True'
+take_every_n = int(os.environ['TAKE_EVERY_N'])
+depth_weight = float(os.environ['DEPTH_WEIGHT'])
+use_pose = os.environ['USE_POSE'] == 'True'
+pose_weight = float(os.environ['POSE_WEIGHT'])
+grid_dimension = int(os.environ['GRID_DIMENSION'])
 
 # synthetic
 # chair drums ficus hotdog lego materials mic ship
@@ -47,250 +54,232 @@ def write_floatpoint_image(name,img):
   img = numpy.clip(numpy.array(img)*255,0,255).astype(numpy.uint8)
   cv2.imwrite(name,img[:,:,::-1])
 #%% --------------------------------------------------------------------------------
-# ## Load the dataset.
+# ## Load the dataset
 #%%
 # """ Load dataset """
 
-if scene_type=="synthetic":
-  white_bkgd = True
-elif scene_type=="forwardfacing":
-  white_bkgd = False
-elif scene_type=="real360":
-  white_bkgd = False
-
-
 #https://github.com/google-research/google-research/blob/master/snerg/nerf/datasets.py
 
+import numpy as np #temporarily use numpy as np, then switch back to jax.numpy
+import jax.numpy as jnp
 
-if scene_type=="synthetic":
+def _viewmatrix(z, up, pos):
+  """Construct lookat view matrix."""
+  vec2 = _normalize(z)
+  vec1_avg = up
+  vec0 = _normalize(np.cross(vec1_avg, vec2))
+  vec1 = _normalize(np.cross(vec2, vec0))
+  m = np.stack([vec0, vec1, vec2, pos], 1)
+  return m
 
-  def load_blender(data_dir, split):
-    with open(
-        os.path.join(data_dir, "transforms_{}.json".format(split)), "r") as fp:
-      meta = json.load(fp)
+def _normalize(x):
+  """Normalization helper function."""
+  return x / np.linalg.norm(x)
 
-    cams = []
-    paths = []
-    for i in range(len(meta["frames"])):
-      frame = meta["frames"][i]
-      cams.append(np.array(frame["transform_matrix"], dtype=np.float32))
+def _poses_avg(poses):
+  """Average poses according to the original NeRF code."""
+  hwf = poses[0, :3, -1:]
+  center = poses[:, :3, 3].mean(0)
+  vec2 = _normalize(poses[:, :3, 2].sum(0))
+  up = poses[:, :3, 1].sum(0)
+  c2w = np.concatenate([_viewmatrix(vec2, up, center), hwf], 1)
+  return c2w
 
-      fname = os.path.join(data_dir, frame["file_path"] + ".png")
-      paths.append(fname)
+def _recenter_poses(poses):
+  """Recenter poses according to the original NeRF code."""
+  poses_ = poses.copy()
+  bottom = np.reshape([0, 0, 0, 1.], [1, 4])
+  c2w = _poses_avg(poses)
+  c2w = np.concatenate([c2w[:3, :4], bottom], -2)
+  bottom = np.tile(np.reshape(bottom, [1, 1, 4]), [poses.shape[0], 1, 1])
+  poses = np.concatenate([poses[:, :3, :4], bottom], -2)
+  poses = np.linalg.inv(c2w) @ poses
+  poses_[:, :3, :4] = poses[:, :3, :4]
+  poses = poses_
+  return poses
 
-    def image_read_fn(fname):
-      with open(fname, "rb") as imgin:
-        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
+def _transform_poses_pca(poses):
+  """Transforms poses so principal components lie on XYZ axes."""
+  poses_ = poses.copy()
+  t = poses[:, :3, 3]
+  t_mean = t.mean(axis=0)
+  t = t - t_mean
+
+  eigval, eigvec = np.linalg.eig(t.T @ t)
+  # Sort eigenvectors in order of largest to smallest eigenvalue.
+  inds = np.argsort(eigval)[::-1]
+  eigvec = eigvec[:, inds]
+  rot = eigvec.T
+  if np.linalg.det(rot) < 0:
+    rot = np.diag(np.array([1, 1, -1])) @ rot
+
+  transform = np.concatenate([rot, rot @ -t_mean[:, None]], -1)
+  bottom = np.broadcast_to([0, 0, 0, 1.], poses[..., :1, :4].shape)
+  pad_poses = np.concatenate([poses[..., :3, :4], bottom], axis=-2)
+  poses_recentered = transform @ pad_poses
+  poses_recentered = poses_recentered[..., :3, :4]
+  transform = np.concatenate([transform, np.eye(4)[3:]], axis=0)
+
+  # Flip coordinate system if z component of y-axis is negative
+  if poses_recentered.mean(axis=0)[2, 1] < 0:
+    poses_recentered = np.diag(np.array([1, -1, -1])) @ poses_recentered
+    transform = np.diag(np.array([1, -1, -1, 1])) @ transform
+
+  # Just make sure it's it in the [-1, 1]^3 cube
+  scale_factor = 1. / np.max(np.abs(poses_recentered[:, :3, 3]))
+  poses_recentered[:, :3, 3] *= scale_factor
+  transform = np.diag(np.array([scale_factor] * 3 + [1])) @ transform
+
+  poses_[:, :3, :4] = poses_recentered[:, :3, :4]
+  poses_recentered = poses_
+  return poses_recentered, transform, scale_factor
+
+def resize_images(images, H, W, interpolation=cv2.INTER_LINEAR):
+  resized = np.zeros((images.shape[0], H, W, images.shape[3]), dtype=images.dtype)
+  for i, img in enumerate(images):
+    r = cv2.resize(img, (W, H), interpolation=interpolation)
+    if images.shape[3] == 1:
+      r = r[..., np.newaxis]
+    resized[i] = r
+  return resized
+
+def load_LLFF(data_dir, factor = 4, llffhold = 8):
+  # Load images.
+  imgdir_suffix = ""
+  if factor > 0:
+    imgdir_suffix = "_{}".format(factor)
+  imgdir = os.path.join(data_dir, "images" + imgdir_suffix)
+  if not os.path.exists(imgdir):
+    raise ValueError("Image folder {} doesn't exist.".format(imgdir))
+  imgfiles = [
+      os.path.join(imgdir, f)
+      for f in sorted(os.listdir(imgdir))
+      if f.endswith("JPG") or f.endswith("jpg") or f.endswith("png")
+  ]
+  if take_every_n > 1:
+    imgfiles = imgfiles[::take_every_n]
+
+  def image_read_fn(fname):
+    with open(fname, "rb") as imgin:
+      image = (np.array(Image.open(imgin)) / 255.0).astype(image_dtype)
+    return image
+
+  with ThreadPool() as pool:
+    images = pool.map(image_read_fn, imgfiles)
+    pool.close()
+    pool.join()
+  images = np.stack(images, axis=-1)
+
+  gc.collect()
+
+  if use_depth:
+    depth_files = [name.replace("images" + imgdir_suffix, "depth").replace('jpg', 'exr') for name in imgfiles]
+
+    def depth_read_fn(fname):
+      image = cv2.imread(fname, -1).astype(image_dtype)
       return image
+
     with ThreadPool() as pool:
-      images = pool.map(image_read_fn, paths)
+      depths = pool.map(depth_read_fn, depth_files)
       pool.close()
       pool.join()
+    depths = np.stack(depths, axis=-1)
 
-    images = np.stack(images, axis=0)
-    if white_bkgd:
-      images = (images[..., :3] * images[..., -1:] + (1. - images[..., -1:]))
-    else:
-      images = images[..., :3] * images[..., -1:]
+    gc.collect()
 
-    h, w = images.shape[1:3]
-    camera_angle_x = float(meta["camera_angle_x"])
-    focal = .5 * w / np.tan(.5 * camera_angle_x)
+  # Load poses and bds.
+  with open(os.path.join(data_dir, "poses_bounds.npy"),
+                        "rb") as fp:
+    poses_arr = np.load(fp)
+  poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
+  poses = poses[:, :, ::take_every_n]
+  if poses.shape[-1] != images.shape[-1]:
+    raise RuntimeError("Mismatch between imgs {} and poses {}".format(
+        images.shape[-1], poses.shape[-1]))
 
-    hwf = np.array([h, w, focal], dtype=np.float32)
-    poses = np.stack(cams, axis=0)
-    return {'images' : images, 'c2w' : poses, 'hwf' : hwf}
+  # Update poses according to downsampling.
+  poses[:2, 4, :] = np.array(images.shape[:2]).reshape([2, 1])
+  poses[2, 4, :] = poses[2, 4, :] * 1. / factor
 
-  data = {'train' : load_blender(scene_dir, 'train'),
-          'test' : load_blender(scene_dir, 'test')}
+  # Move variable dim to axis 0.
+  poses = np.moveaxis(poses, -1, 0).astype(np.float32)
+  images = np.moveaxis(images, -1, 0)
+  if use_depth:
+    depths = np.moveaxis(depths, -1, 0)
+    depths = resize_images(depths, images.shape[1], images.shape[2])
+    depths = depths[:, :, :, 2]
 
-  splits = ['train', 'test']
-  for s in splits:
-    print(s)
-    for k in data[s]:
-      print(f'  {k}: {data[s][k].shape}')
+  # Rotate/scale poses to align ground with xy plane and fit to unit cube.
+  poses, _, scale = _transform_poses_pca(poses)
+  depth_scale = scale
+  if use_depth:
+    depths *= scale
 
-  images, poses, hwf = data['train']['images'], data['train']['c2w'], data['train']['hwf']
-  write_floatpoint_image(samples_dir+"/training_image_sample.png",images[0])
+  # Select the split.
+  i_test = np.arange(images.shape[0])[::llffhold]
+  i_train = np.array(
+      [i for i in np.arange(int(images.shape[0])) if i not in i_test])
 
-  for i in range(3):
-    plt.figure()
-    plt.scatter(poses[:,i,3], poses[:,(i+1)%3,3])
-    plt.axis('equal')
-    plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
+  train_images = images[i_train]
+  train_poses = poses[i_train]
+  train_camtoworlds = train_poses[:, :3, :4]
+  if use_depth:
+    train_depths = depths[i_train]
 
-elif scene_type=="forwardfacing" or scene_type=="real360":
+  test_images = images[i_test]
+  test_poses = poses[i_test]
+  test_camtoworlds = test_poses[:, :3, :4]
+  if use_depth:
+    test_depths = depths[i_test]
 
-  import numpy as np #temporarily use numpy as np, then switch back to jax.numpy
-  import jax.numpy as jnp
+  focal = poses[0, -1, -1]
+  h, w = images.shape[1:3]
 
-  def _viewmatrix(z, up, pos):
-    """Construct lookat view matrix."""
-    vec2 = _normalize(z)
-    vec1_avg = up
-    vec0 = _normalize(np.cross(vec1_avg, vec2))
-    vec1 = _normalize(np.cross(vec2, vec0))
-    m = np.stack([vec0, vec1, vec2, pos], 1)
-    return m
+  hwf = np.array([h, w, focal], dtype=np.float32)
 
-  def _normalize(x):
-    """Normalization helper function."""
-    return x / np.linalg.norm(x)
+  gc.collect()
+  data = {'train': {'images' : jnp.array(train_images), 'c2w' : jnp.array(train_camtoworlds), 'hwf' : jnp.array(hwf)},
+          'test': {'images' : jnp.array(test_images), 'c2w' : jnp.array(test_camtoworlds), 'hwf' : jnp.array(hwf)}}
+  if use_depth:
+    data['train']['depths'] = train_depths
+    data['test']['depths'] = test_depths
+  return data, depth_scale
 
-  def _poses_avg(poses):
-    """Average poses according to the original NeRF code."""
-    hwf = poses[0, :3, -1:]
-    center = poses[:, :3, 3].mean(0)
-    vec2 = _normalize(poses[:, :3, 2].sum(0))
-    up = poses[:, :3, 1].sum(0)
-    c2w = np.concatenate([_viewmatrix(vec2, up, center), hwf], 1)
-    return c2w
+data, depth_scale = load_LLFF(scene_dir, factor)
 
-  def _recenter_poses(poses):
-    """Recenter poses according to the original NeRF code."""
-    poses_ = poses.copy()
-    bottom = np.reshape([0, 0, 0, 1.], [1, 4])
-    c2w = _poses_avg(poses)
-    c2w = np.concatenate([c2w[:3, :4], bottom], -2)
-    bottom = np.tile(np.reshape(bottom, [1, 1, 4]), [poses.shape[0], 1, 1])
-    poses = np.concatenate([poses[:, :3, :4], bottom], -2)
-    poses = np.linalg.inv(c2w) @ poses
-    poses_[:, :3, :4] = poses[:, :3, :4]
-    poses = poses_
-    return poses
+splits = ['train', 'test']
+for s in splits:
+  print(s)
+  for k in data[s]:
+    print(f'  {k}: {data[s][k].shape}')
 
-  def _transform_poses_pca(poses):
-    """Transforms poses so principal components lie on XYZ axes."""
-    poses_ = poses.copy()
-    t = poses[:, :3, 3]
-    t_mean = t.mean(axis=0)
-    t = t - t_mean
+images, poses, hwf = data['train']['images'], data['train']['c2w'], data['train']['hwf']
+if use_depth:
+  depths = data['train']['depths']
+write_floatpoint_image(samples_dir+"/training_image_sample.png",images[0])
 
-    eigval, eigvec = np.linalg.eig(t.T @ t)
-    # Sort eigenvectors in order of largest to smallest eigenvalue.
-    inds = np.argsort(eigval)[::-1]
-    eigvec = eigvec[:, inds]
-    rot = eigvec.T
-    if np.linalg.det(rot) < 0:
-      rot = np.diag(np.array([1, 1, -1])) @ rot
+for i in range(3):
+  plt.figure()
+  plt.scatter(poses[:,i,3], poses[:,(i+1)%3,3])
+  plt.axis('equal')
+  plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
 
-    transform = np.concatenate([rot, rot @ -t_mean[:, None]], -1)
-    bottom = np.broadcast_to([0, 0, 0, 1.], poses[..., :1, :4].shape)
-    pad_poses = np.concatenate([poses[..., :3, :4], bottom], axis=-2)
-    poses_recentered = transform @ pad_poses
-    poses_recentered = poses_recentered[..., :3, :4]
-    transform = np.concatenate([transform, np.eye(4)[3:]], axis=0)
+bg_color = jnp.mean(images)
+if use_depth:
+  mean_dist = jnp.percentile(depths, 95)
+  print('Depths (m):')
+  print(f'  25% - {jnp.percentile(depths, 25) / depth_scale}')
+  print(f'  50% - {jnp.percentile(depths, 50) / depth_scale}')
+  print(f'  75% - {jnp.percentile(depths, 75) / depth_scale}')
+  print(f'  90% - {jnp.percentile(depths, 90) / depth_scale}')
+  print(f'  95% - {jnp.percentile(depths, 95) / depth_scale}')
+  print(f'  99% - {jnp.percentile(depths, 99) / depth_scale}')
+  print(f'Depth scale: {depth_scale}')
 
-    # Flip coordinate system if z component of y-axis is negative
-    if poses_recentered.mean(axis=0)[2, 1] < 0:
-      poses_recentered = np.diag(np.array([1, -1, -1])) @ poses_recentered
-      transform = np.diag(np.array([1, -1, -1, 1])) @ transform
+import jax.numpy as np
 
-    # Just make sure it's it in the [-1, 1]^3 cube
-    scale_factor = 1. / np.max(np.abs(poses_recentered[:, :3, 3]))
-    poses_recentered[:, :3, 3] *= scale_factor
-    transform = np.diag(np.array([scale_factor] * 3 + [1])) @ transform
-
-    poses_[:, :3, :4] = poses_recentered[:, :3, :4]
-    poses_recentered = poses_
-    return poses_recentered, transform
-
-  def load_LLFF(data_dir, split, factor = 4, llffhold = 8):
-    # Load images.
-    imgdir_suffix = ""
-    if factor > 0:
-      imgdir_suffix = "_{}".format(factor)
-    imgdir = os.path.join(data_dir, "images" + imgdir_suffix)
-    if not os.path.exists(imgdir):
-      raise ValueError("Image folder {} doesn't exist.".format(imgdir))
-    imgfiles = [
-        os.path.join(imgdir, f)
-        for f in sorted(os.listdir(imgdir))
-        if f.endswith("JPG") or f.endswith("jpg") or f.endswith("png")
-    ]
-    def image_read_fn(fname):
-      with open(fname, "rb") as imgin:
-        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
-      return image
-    with ThreadPool() as pool:
-      images = pool.map(image_read_fn, imgfiles)
-      pool.close()
-      pool.join()
-    images = np.stack(images, axis=-1)
-
-    # Load poses and bds.
-    with open(os.path.join(data_dir, "poses_bounds.npy"),
-                          "rb") as fp:
-      poses_arr = np.load(fp)
-    poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
-    bds = poses_arr[:, -2:].transpose([1, 0])
-    if poses.shape[-1] != images.shape[-1]:
-      raise RuntimeError("Mismatch between imgs {} and poses {}".format(
-          images.shape[-1], poses.shape[-1]))
-
-    # Update poses according to downsampling.
-    poses[:2, 4, :] = np.array(images.shape[:2]).reshape([2, 1])
-    poses[2, 4, :] = poses[2, 4, :] * 1. / factor
-
-    # Correct rotation matrix ordering and move variable dim to axis 0.
-    poses = np.concatenate(
-        [poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1)
-    poses = np.moveaxis(poses, -1, 0).astype(np.float32)
-    images = np.moveaxis(images, -1, 0)
-    bds = np.moveaxis(bds, -1, 0).astype(np.float32)
-
-
-    if scene_type=="real360":
-      # Rotate/scale poses to align ground with xy plane and fit to unit cube.
-      poses, _ = _transform_poses_pca(poses)
-    else:
-      # Rescale according to a default bd factor.
-      scale = 1. / (bds.min() * .75)
-      poses[:, :3, 3] *= scale
-      bds *= scale
-      # Recenter poses
-      poses = _recenter_poses(poses)
-
-    # Select the split.
-    i_test = np.arange(images.shape[0])[::llffhold]
-    i_train = np.array(
-        [i for i in np.arange(int(images.shape[0])) if i not in i_test])
-    if split == "train":
-      indices = i_train
-    else:
-      indices = i_test
-    images = images[indices]
-    poses = poses[indices]
-
-    camtoworlds = poses[:, :3, :4]
-    focal = poses[0, -1, -1]
-    h, w = images.shape[1:3]
-
-    hwf = np.array([h, w, focal], dtype=np.float32)
-
-    return {'images' : jnp.array(images), 'c2w' : jnp.array(camtoworlds), 'hwf' : jnp.array(hwf)}
-
-  data = {'train' : load_LLFF(scene_dir, 'train', factor),
-          'test' : load_LLFF(scene_dir, 'test', factor)}
-
-  splits = ['train', 'test']
-  for s in splits:
-    print(s)
-    for k in data[s]:
-      print(f'  {k}: {data[s][k].shape}')
-
-  images, poses, hwf = data['train']['images'], data['train']['c2w'], data['train']['hwf']
-  write_floatpoint_image(samples_dir+"/training_image_sample.png",images[0])
-
-  for i in range(3):
-    plt.figure()
-    plt.scatter(poses[:,i,3], poses[:,(i+1)%3,3])
-    plt.axis('equal')
-    plt.savefig(samples_dir+"/training_camera"+str(i)+".png")
-
-  bg_color = jnp.mean(images)
-
-  import jax.numpy as np
+print('Loaded data')
+gc.collect()
 #%% --------------------------------------------------------------------------------
 # ## Helper functions
 #%%
@@ -331,20 +320,6 @@ def sinusoidal_encoding(position, minimum_frequency_power,
 
 # Pose/ray math.
 
-def generate_rays(pixel_coords, pix2cam, cam2world):
-  """Generate camera rays from pixel coordinates and poses."""
-  homog = np.ones_like(pixel_coords[..., :1])
-  pixel_dirs = np.concatenate([pixel_coords + .5, homog], axis=-1)[..., None]
-  cam_dirs = matmul(pix2cam, pixel_dirs)
-  ray_dirs = matmul(cam2world[..., :3, :3], cam_dirs)[..., 0]
-  ray_origins = np.broadcast_to(cam2world[..., :3, 3], ray_dirs.shape)
-
-  #f = 1./pix2cam[0,0]
-  #w = -2. * f * pix2cam[0,2]
-  #h =  2. * f * pix2cam[1,2]
-
-  return ray_origins, ray_dirs
-
 def pix2cam_matrix(height, width, focal):
   """Inverse intrinsic matrix for a pinhole camera."""
   return  np.array([
@@ -352,58 +327,6 @@ def pix2cam_matrix(height, width, focal):
       [0, -1./focal, .5 * height / focal],
       [0, 0, -1.],
   ])
-
-def camera_ray_batch_xxxxx_original(cam2world, hwf):
-  """Generate rays for a pinhole camera with given extrinsic and intrinsic."""
-  height, width = int(hwf[0]), int(hwf[1])
-  pix2cam = pix2cam_matrix(*hwf)
-  pixel_coords = np.stack(np.meshgrid(np.arange(width), np.arange(height)), axis=-1)
-  return generate_rays(pixel_coords, pix2cam, cam2world)
-
-def camera_ray_batch(cam2world, hwf): ### antialiasing by supersampling
-  """Generate rays for a pinhole camera with given extrinsic and intrinsic."""
-  height, width = int(hwf[0]), int(hwf[1])
-  pix2cam = pix2cam_matrix(*hwf)
-  x_ind, y_ind = np.meshgrid(np.arange(width), np.arange(height))
-  pixel_coords = np.stack([x_ind-0.25, y_ind-0.25, x_ind+0.25, y_ind-0.25,
-                  x_ind-0.25, y_ind+0.25, x_ind+0.25, y_ind+0.25], axis=-1)
-  pixel_coords = np.reshape(pixel_coords, [height,width,4,2])
-
-  return generate_rays(pixel_coords, pix2cam, cam2world)
-
-def random_ray_batch_xxxxx_original(rng, batch_size, data):
-  """Generate a random batch of ray data."""
-  keys = random.split(rng, 3)
-  cam_ind = random.randint(keys[0], [batch_size], 0, data['c2w'].shape[0])
-  y_ind = random.randint(keys[1], [batch_size], 0, data['images'].shape[1])
-  x_ind = random.randint(keys[2], [batch_size], 0, data['images'].shape[2])
-  pixel_coords = np.stack([x_ind, y_ind], axis=-1)
-  pix2cam = pix2cam_matrix(*data['hwf'])
-  cam2world = data['c2w'][cam_ind, :3, :4]
-  rays = generate_rays(pixel_coords, pix2cam, cam2world)
-  pixels = data['images'][cam_ind, y_ind, x_ind]
-  return rays, pixels
-
-def random_ray_batch(rng, batch_size, data): ### antialiasing by supersampling
-  """Generate a random batch of ray data."""
-  keys = random.split(rng, 3)
-  cam_ind = random.randint(keys[0], [batch_size], 0, data['c2w'].shape[0])
-  y_ind = random.randint(keys[1], [batch_size], 0, data['images'].shape[1])
-  y_ind_f = y_ind.astype(np.float32)
-  x_ind = random.randint(keys[2], [batch_size], 0, data['images'].shape[2])
-  x_ind_f = x_ind.astype(np.float32)
-  pixel_coords = np.stack([x_ind_f-0.25, y_ind_f-0.25, x_ind_f+0.25, y_ind_f-0.25,
-                  x_ind_f-0.25, y_ind_f+0.25, x_ind_f+0.25, y_ind_f+0.25], axis=-1)
-  pixel_coords = np.reshape(pixel_coords, [batch_size,4,2])
-  pix2cam = pix2cam_matrix(*data['hwf'])
-  cam_ind_x4 = np.tile(cam_ind[..., None], [1,4])
-  cam_ind_x4 = np.reshape(cam_ind_x4, [-1])
-  cam2world = data['c2w'][cam_ind_x4, :3, :4]
-  cam2world = np.reshape(cam2world, [batch_size,4,3,4])
-  rays = generate_rays(pixel_coords, pix2cam, cam2world)
-  pixels = data['images'][cam_ind, y_ind, x_ind]
-  return rays, pixels
-
 
 # Learning rate helpers.
 
@@ -435,7 +358,7 @@ if scene_type=="synthetic":
     scene_grid_scale = 1.5
   grid_min = np.array([-1, -1, -1]) * scene_grid_scale
   grid_max = np.array([ 1,  1,  1]) * scene_grid_scale
-  point_grid_size = 128
+  point_grid_size = grid_dimension
 
   def get_taper_coord(p):
     return p
@@ -449,7 +372,7 @@ elif scene_type=="forwardfacing":
   scene_grid_scale = 0.7
   grid_min = np.array([-scene_grid_scale, -scene_grid_scale,  0])
   grid_max = np.array([ scene_grid_scale,  scene_grid_scale,  1])
-  point_grid_size = 128
+  point_grid_size = grid_dimension
 
   def get_taper_coord(p):
     pz = np.maximum(-p[..., 2:3],1e-10)
@@ -472,7 +395,7 @@ elif scene_type=="real360":
     scene_grid_zmax = 9.0
   grid_min = np.array([-1, -1, -1])
   grid_max = np.array([ 1,  1,  1])
-  point_grid_size = 128
+  point_grid_size = grid_dimension
 
   def get_taper_coord(p):
     return p
@@ -493,8 +416,9 @@ elif scene_type=="real360":
     1/0
 
 
+print('Initializing point grid')
 
-grid_dtype = np.float32
+grid_dtype = image_dtype
 
 #plane parameter grid
 point_grid = np.zeros(
@@ -505,7 +429,7 @@ acc_grid = np.zeros(
       dtype=grid_dtype)
 point_grid_diff_lr_scale = 16.0/point_grid_size
 
-
+print('Initialized grid')
 
 def get_acc_grid_masks(taper_positions, acc_grid):
   grid_positions = (taper_positions - grid_min) * \
@@ -1232,6 +1156,7 @@ def compute_box_intersection(rays):
 #%%
 num_bottleneck_features = 8
 
+print('MLP setup')
 
 def dense_layer(width):
   return nn.Dense(
@@ -1263,6 +1188,22 @@ class RadianceField(nn.Module):
 
     return net
 
+class DeepMLP(nn.Module):
+  out_dim: int
+  trunk_width: int = 384
+  trunk_depth: int = 4
+  network_activation: Callable = nn.relu
+  @nn.compact
+  def __call__(self, inputs):
+    net = inputs
+    for i in range(self.trunk_depth):
+      net = dense_layer(self.trunk_width)(net)
+      net = self.network_activation(net)
+
+    net = dense_layer(self.out_dim)(net)
+
+    return net
+
 # Set up the MLPs for color and density.
 class MLP(nn.Module):
   features: Sequence[int]
@@ -1279,8 +1220,14 @@ density_model = RadianceField(1)
 feature_model = RadianceField(num_bottleneck_features)
 color_model = MLP([16,16,3])
 
+pose_model = DeepMLP(6)
+pose_weights = pose_model.init(
+                jax.random.PRNGKey(0),
+                np.zeros([1, 6]))
+
 # These are the variables we will be optimizing during trianing.
 model_vars = [point_grid, acc_grid,
+              pose_weights,
               density_model.init(
                   jax.random.PRNGKey(0),
                   np.zeros([1, 3])),
@@ -1291,6 +1238,8 @@ model_vars = [point_grid, acc_grid,
                   jax.random.PRNGKey(0),
                   np.zeros([1, 3+num_bottleneck_features])),
               ]
+
+print('Model vars set up')
 
 #avoid bugs
 point_grid = None
@@ -1359,14 +1308,10 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng): ### antialiasin
   rgb_b = jax.nn.sigmoid(color_model.apply(vars[-1], features_dirs_enc_b))
 
   # Composite onto the background color.
-  if white_bkgd:
-    rgb = rgb * acc[..., None] + (1. - acc[..., None])
-    rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None])
-  else:
-    bgc = random.randint(rng, [1], 0, 2).astype(bg_color.dtype) * wbgcolor + \
-          bg_color * (1-wbgcolor)
-    rgb = rgb * acc[..., None] + (1. - acc[..., None]) * bgc
-    rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None]) * bgc
+  bgc = random.randint(rng, [1], 0, 2).astype(bg_color.dtype) * wbgcolor + \
+        bg_color * (1-wbgcolor)
+  rgb = rgb * acc[..., None] + (1. - acc[..., None]) * bgc
+  rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None]) * bgc
 
   #get acc_grid_masks to update acc_grid
   acc_grid_masks = get_acc_grid_masks(pts, vars[1])
@@ -1407,6 +1352,61 @@ def render_loop(rays, vars, chunk): ### antialiasing by supersampling
   outs = [np.reshape(
       np.concatenate([z[i] for z in outs])[:l], sh + [-1]) for i in range(4)]
   return outs
+
+def get_rotation_matrices(rotations):
+  cos_alpha = np.cos(rotations[..., 0])
+  cos_beta = np.cos(rotations[..., 1])
+  cos_gamma = np.cos(rotations[..., 2])
+  sin_alpha = np.sin(rotations[..., 0])
+  sin_beta = np.sin(rotations[..., 1])
+  sin_gamma = np.sin(rotations[..., 2])
+
+  col1 = np.stack([cos_alpha * cos_beta,
+                    sin_alpha * cos_beta,
+                    -sin_beta], -1)
+  col2 = np.stack([cos_alpha * sin_beta * sin_gamma - sin_alpha * cos_gamma,
+                    sin_alpha * sin_beta * sin_gamma + cos_alpha * cos_gamma,
+                    cos_beta * sin_gamma], -1)
+  col3 = np.stack([cos_alpha * sin_beta * cos_gamma + sin_alpha * sin_gamma,
+                    sin_alpha * sin_beta * cos_gamma - cos_alpha * sin_gamma,
+                    cos_beta * cos_gamma], -1)
+
+  return np.stack([col1, col2, col3], -1)
+
+def generate_rays(pixel_coords, pix2cam, cam2world):
+  """Generate camera rays from pixel coordinates and poses."""
+  homog = np.ones_like(pixel_coords[..., :1])
+  pixel_dirs = np.concatenate([pixel_coords + .5, homog], axis=-1)[..., None]
+  cam_dirs = matmul(pix2cam, pixel_dirs)
+  ray_dirs = matmul(cam2world[..., :3, :3], cam_dirs)[..., 0]
+  ray_origins = np.broadcast_to(cam2world[..., :3, 3], ray_dirs.shape)
+  #f = 1./pix2cam[0,0]
+  #w = -2. * f * pix2cam[0,2]
+  #h =  2. * f * pix2cam[1,2]
+
+def camera_ray_batch(cam2world, hwf): ### antialiasing by supersampling
+  """Generate rays for a pinhole camera with given extrinsic and intrinsic."""
+  height, width = int(hwf[0]), int(hwf[1])
+  pix2cam = pix2cam_matrix(*hwf)
+  x_ind, y_ind = np.meshgrid(np.arange(width), np.arange(height))
+  pixel_coords = np.stack([x_ind-0.25, y_ind-0.25, x_ind+0.25, y_ind-0.25,
+                  x_ind-0.25, y_ind+0.25, x_ind+0.25, y_ind+0.25], axis=-1)
+  pixel_coords = np.reshape(pixel_coords, [height,width,4,2])
+  (ray_origin, ray_direction) = generate_rays(pixel_coords, pix2cam, cam2world)
+
+  if use_pose:
+    pose_input = np.concatenate((ray_origin, ray_direction), axis=-1)
+    pose_shift = jax.numpy.tanh(pose_model.apply(vars[-4], pose_input))
+    pose_shift = jax.lax.stop_gradient(pose_shift)
+
+    rotation_vectors = pose_shift[..., :3]
+    rotation_matrices = get_rotation_matrices(rotation_vectors)
+    translation_vectors = pose_shift[..., 3:]
+
+    ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
+    ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
+
+  return (ray_origin, ray_direction)
 
 # Make sure that everything works, by rendering an image from the test set
 
@@ -1457,6 +1457,39 @@ def compute_TV(acc_grid):
   dz = acc_grid[:,:,:-1] - acc_grid[:,:,1:]
   TV = np.mean(np.square(dx))+np.mean(np.square(dy))+np.mean(np.square(dz))
   return TV
+
+def random_ray_batch(rng, batch_size, data): ### antialiasing by supersampling
+  """Generate a random batch of ray data."""
+  keys = random.split(rng, 3)
+  cam_ind = random.randint(keys[0], [batch_size], 0, data['c2w'].shape[0])
+  y_ind = random.randint(keys[1], [batch_size], 0, data['images'].shape[1])
+  y_ind_f = y_ind.astype(np.float32)
+  x_ind = random.randint(keys[2], [batch_size], 0, data['images'].shape[2])
+  x_ind_f = x_ind.astype(np.float32)
+  pixel_coords = np.stack([x_ind_f-0.25, y_ind_f-0.25, x_ind_f+0.25, y_ind_f-0.25,
+                  x_ind_f-0.25, y_ind_f+0.25, x_ind_f+0.25, y_ind_f+0.25], axis=-1)
+  pixel_coords = np.reshape(pixel_coords, [batch_size,4,2])
+  pix2cam = pix2cam_matrix(*data['hwf'])
+  cam_ind_x4 = np.tile(cam_ind[..., None], [1,4])
+  cam_ind_x4 = np.reshape(cam_ind_x4, [-1])
+  cam2world = data['c2w'][cam_ind_x4, :3, :4]
+  cam2world = np.reshape(cam2world, [batch_size,4,3,4])
+  (ray_origin, ray_direction) = generate_rays(pixel_coords, pix2cam, cam2world)
+
+  if use_pose:
+    pose_input = np.concatenate((ray_origin, ray_direction), axis=-1)
+    pose_shift = jax.numpy.tanh(pose_model.apply(vars[-4], pose_input))
+    pose_shift = jax.lax.stop_gradient(pose_shift)
+
+    rotation_vectors = pose_shift[..., :3]
+    rotation_matrices = get_rotation_matrices(rotation_vectors)
+    translation_vectors = pose_shift[..., 3:]
+
+    ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
+    ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
+
+  pixels = data['images'][cam_ind, y_ind, x_ind]
+  return (ray_origin, ray_direction), pixels
 
 def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
   key, rng = random.split(rng)
@@ -1774,12 +1807,9 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng): ### antialiasin
   rgb_b = jax.nn.sigmoid(color_model.apply(vars[-1], features_dirs_enc_b))
 
   # Composite onto the background color.
-  if white_bkgd:
-    rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None])
-  else:
-    bgc = random.randint(rng, [1], 0, 2).astype(bg_color.dtype) * wbgcolor + \
-          bg_color * (1-wbgcolor)
-    rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None]) * bgc
+  bgc = random.randint(rng, [1], 0, 2).astype(bg_color.dtype) * wbgcolor + \
+        bg_color * (1-wbgcolor)
+  rgb_b = rgb_b * acc_b[..., None] + (1. - acc_b[..., None]) * bgc
 
   return rgb_b, acc_b
 #%% --------------------------------------------------------------------------------
@@ -1845,7 +1875,7 @@ write_floatpoint_image(samples_dir+"/s2_1_"+str(0)+"_acc_binarized.png",acc_b)
 #%%
 def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
   key, rng = random.split(rng)
-  rays, pixels = random_ray_batch(
+  rays, pixels, distances, pose_shift = random_ray_batch(
       key, batch_size // n_device, traindata)
 
   def loss_fn(vars):
