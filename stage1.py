@@ -897,7 +897,13 @@ def compute_undc_intersection(point_grid, cell_xyz, masks, rays, keep_num):
   world_tx = world_positions*ray_directions[..., None,:]
   world_tx = np.sum(world_tx, -1) #[..., SN*24]
   world_tx = world_tx*world_masks + 1000*np.logical_not(world_masks).astype(dtype)
+  
+  ind = np.argsort(world_tx, axis=-1)
+  ind = ind[..., :keep_num]
 
+  world_tx = np.take_along_axis(world_tx, ind, axis=-1)
+  world_masks = np.take_along_axis(world_masks, ind, axis=-1)
+  world_positions = np.take_along_axis(world_positions, ind[..., None], axis=-2)
   taper_positions = get_taper_coord(world_positions)
   taper_positions = taper_positions*world_masks[..., None]
 
@@ -1386,7 +1392,7 @@ keep_num = test_keep_num*4
 max_grid_mask_num = 0
 reduce_keep_num = False
 
-training_iters = 200000
+training_iters = 300000
 train_iters_cont = 300000
 
 print("Training")
