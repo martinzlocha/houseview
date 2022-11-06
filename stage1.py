@@ -266,14 +266,19 @@ for i in range(3):
 
 bg_color = jnp.mean(images)
 if use_depth:
-  mean_dist = jnp.percentile(depths, 95)
+  default_dist = jnp.percentile(depths, 95)
+  percentiles = jnp.percentile(depths, np.array([1, 5, 10, 25, 50, 75, 90, 95, 99])) / depth_scale
+
   print('Depths (m):')
-  print(f'  25% - {jnp.percentile(depths, 25) / depth_scale}')
-  print(f'  50% - {jnp.percentile(depths, 50) / depth_scale}')
-  print(f'  75% - {jnp.percentile(depths, 75) / depth_scale}')
-  print(f'  90% - {jnp.percentile(depths, 90) / depth_scale}')
-  print(f'  95% - {jnp.percentile(depths, 95) / depth_scale}')
-  print(f'  99% - {jnp.percentile(depths, 99) / depth_scale}')
+  print(f'  1% - {percentiles[0]}')
+  print(f'  5% - {percentiles[1]}')
+  print(f'  10% - {percentiles[2]}')
+  print(f'  25% - {percentiles[3]}')
+  print(f'  50% - {percentiles[4]}')
+  print(f'  75% - {percentiles[5]}')
+  print(f'  90% - {percentiles[6]}')
+  print(f'  95% - {percentiles[7]}')
+  print(f'  99% - {percentiles[8]}')
   print(f'Depth scale: {depth_scale}')
 
 import jax.numpy as np
@@ -487,6 +492,8 @@ def gridcell_from_rays(rays, acc_grid, keep_num, threshold): #same as synthetic,
   tz = tz*(1-dzm) + 1000*dzm
 
   txyz = np.concatenate([tx, ty, tz], axis=-1)
+  txyzm = (txyz<=0.2).astype(dtype)
+  txyz = txyz*(1-txyzm) + 1000*txyzm
 
   #compute mask from acc_grid
   txyz = txyz + small_step
@@ -1090,14 +1097,6 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
   pts, grid_masks, points, fake_t = compute_undc_intersection(vars[0],
                         grid_indices, grid_masks, rays, keep_num)
 
-  if scene_type=="forwardfacing":
-    fake_t = compute_t_forwardfacing(pts,grid_masks)
-  elif scene_type=="real360":
-    skybox_positions, skybox_masks = compute_box_intersection(rays)
-    pts = np.concatenate([pts,skybox_positions], axis=-2)
-    grid_masks = np.concatenate([grid_masks,skybox_masks], axis=-1)
-    pts, grid_masks, fake_t = sort_and_compute_t_real360(pts,grid_masks)
-
   # Now use the MLP to compute density and features
   mlp_alpha = density_model.apply(vars[-3], pts)
   mlp_alpha = jax.nn.sigmoid(mlp_alpha[..., 0]-8)
@@ -1114,7 +1113,7 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
 
     weigheted_dist = np.sum(dist * alpha_change, axis=-1)
     change_acc = np.sum(alpha_change, axis=-1)
-    weigheted_dist += (1. - change_acc) * mean_dist
+    weigheted_dist += (1. - change_acc) * default_dist
 
   weights = compute_volumetric_rendering_weights_with_alpha(mlp_alpha)
   acc = np.sum(weights, axis=-1)
@@ -1396,6 +1395,7 @@ t_last = 0.0
 i_last = step_init
 keep_num = test_keep_num*4
 threshold = -100000.0
+max_grid_mask_num = 0
 
 training_iters = 200000
 train_iters_cont = 300000
@@ -1452,9 +1452,8 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print('PSNR: %0.3f' % np.mean(np.array(psnrs[-200:])))
     to_keep_recent = np.array(to_keep_hist[-1000:])
     print(f'To keep: {np.max(to_keep_recent)}')
-    prev_grid_mask_num = np.mean(np.array(grid_mask_hist[-1000:-500]))
-    latest_grid_mask_num = np.mean(np.array(grid_mask_hist[-500:]))
-    print(f'Grid masks: {prev_grid_mask_num:.3f} -> {latest_grid_mask_num:.3f}')
+    latest_grid_mask_num = np.mean(np.array(grid_mask_hist[-100:]))
+    print(f'Grid masks: {latest_grid_mask_num:.3f}')
     if use_depth:
       print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-200:])))
     if use_pose:
@@ -1464,7 +1463,9 @@ for i in tqdm(range(step_init, training_iters + 1)):
     if new_keep_num / keep_num < 0.9:
       print(f'Updating keep num: {keep_num} -> {new_keep_num}')
       keep_num = new_keep_num
-    if i >= 50000 or latest_grid_mask_num / prev_grid_mask_num < 0.95:
+
+    max_grid_mask_num = max(max_grid_mask_num, latest_grid_mask_num)
+    if i >= 50000 or latest_grid_mask_num / max_grid_mask_num < 0.95:
       threshold = test_threshold
 
   if (i % 10000 == 0) and i > 0:
