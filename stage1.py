@@ -460,7 +460,6 @@ def gridcell_from_rays(rays, acc_grid, keep_num, threshold): #same as synthetic,
   dtype = ray_origins.dtype
   batch_shape = ray_origins.shape[:-1]
   small_step = 1e-5
-  epsilon = 1e-5
 
   ox = ray_origins[..., 0:1]
   oy = ray_origins[..., 1:2]
@@ -470,15 +469,6 @@ def gridcell_from_rays(rays, acc_grid, keep_num, threshold): #same as synthetic,
   dy = ray_directions[..., 1:2]
   dz = ray_directions[..., 2:3]
 
-  dxm = (np.abs(dx)<epsilon).astype(dtype)
-  dym = (np.abs(dy)<epsilon).astype(dtype)
-  dzm = (np.abs(dz)<epsilon).astype(dtype)
-
-  #avoid zero div
-  dx = dx+dxm
-  dy = dy+dym
-  dz = dz+dzm
-
   layers = np.arange(point_grid_size+1,dtype=dtype)/point_grid_size #[0,1]
   layers = np.reshape(layers, [1]*len(batch_shape)+[point_grid_size+1])
   layers = np.broadcast_to(layers, list(batch_shape)+[point_grid_size+1])
@@ -486,10 +476,6 @@ def gridcell_from_rays(rays, acc_grid, keep_num, threshold): #same as synthetic,
   tx = ((layers*(grid_max[0]-grid_min[0])+grid_min[0])-ox)/dx
   ty = ((layers*(grid_max[1]-grid_min[1])+grid_min[1])-oy)/dy
   tz = ((layers*(grid_max[2]-grid_min[2])+grid_min[2])-oz)/dz
-
-  tx = tx*(1-dxm) + 1000*dxm
-  ty = ty*(1-dym) + 1000*dym
-  tz = tz*(1-dzm) + 1000*dzm
 
   txyz = np.concatenate([tx, ty, tz], axis=-1)
   txyzm = (txyz<=0.2).astype(dtype)
@@ -943,7 +929,6 @@ def compute_box_intersection(rays):
 
   dtype = ray_origins.dtype
   batch_shape = ray_origins.shape[:-1]
-  epsilon = 1e-10
 
   ox = ray_origins[..., 0:1]
   oy = ray_origins[..., 1:2]
@@ -952,13 +937,6 @@ def compute_box_intersection(rays):
   dx = ray_directions[..., 0:1]
   dy = ray_directions[..., 1:2]
   dz = ray_directions[..., 2:3]
-
-  dxm = (np.abs(dx)<epsilon)
-  dym = (np.abs(dy)<epsilon)
-
-  #avoid zero div
-  dx = dx+dxm.astype(dtype)
-  dy = dy+dym.astype(dtype)
 
   layers_ = np.arange((point_grid_size//2)+1,dtype=dtype)/(point_grid_size//2) #[0,1]
   layers = (np.exp( layers_ * scene_grid_zcc ) + (scene_grid_zcc-1)) / scene_grid_zcc
@@ -1231,6 +1209,9 @@ def camera_ray_batch(cam2world, hwf, vars):
     ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
     ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
 
+  epsilon = 1e-5
+  ray_direction = ray_direction + (np.abs(ray_direction)<epsilon) * epsilon
+
   return (ray_origin, ray_direction)
 
 def generate_test_samples(iteration, model, num=test_samples):
@@ -1307,6 +1288,9 @@ def random_ray_batch(rng, batch_size, data, vars):
 
     ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
     ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
+
+  epsilon = 1e-5
+  ray_direction = ray_direction + (np.abs(ray_direction)<epsilon) * epsilon
 
   pixels = data['images'][cam_ind, y_ind, x_ind]
   distances = None
@@ -1419,8 +1403,10 @@ for i in tqdm(range(step_init, training_iters + 1)):
     batch_size = test_batch_size//4
   elif i<=100000:
     batch_size = test_batch_size//2
+    threshold = test_threshold
   else:
     batch_size = test_batch_size
+    threshold = test_threshold
 
   rng, key1, key2 = random.split(rng, 3)
   key2 = random.split(key2, n_device)
@@ -1463,10 +1449,6 @@ for i in tqdm(range(step_init, training_iters + 1)):
     if new_keep_num / keep_num < 0.9:
       print(f'Updating keep num: {keep_num} -> {new_keep_num}')
       keep_num = new_keep_num
-
-    max_grid_mask_num = max(max_grid_mask_num, latest_grid_mask_num)
-    if i >= 50000 or latest_grid_mask_num / max_grid_mask_num < 0.95:
-      threshold = test_threshold
 
   if (i % 10000 == 0) and i > 0:
     gc.collect()
