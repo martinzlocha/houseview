@@ -126,7 +126,7 @@ def _transform_poses_pca(poses):
     transform = np.diag(np.array([1, -1, -1, 1])) @ transform
 
   # Just make sure it's it in the [-1, 1]^3 cube
-  scale_factor = 1. / np.max(np.abs(poses_recentered[:, :3, 3]))
+  scale_factor = 1. / (np.max(np.abs(poses_recentered[:, :3, 3])) + 0.5)
   poses_recentered[:, :3, 3] *= scale_factor
   transform = np.diag(np.array([scale_factor] * 3 + [1])) @ transform
 
@@ -453,7 +453,7 @@ def get_acc_grid_masks(taper_positions, acc_grid):
 
 #compute ray-gridcell intersections
 
-def gridcell_from_rays(rays, acc_grid, keep_num, threshold): #same as synthetic, except near clip
+def gridcell_from_rays(rays, acc_grid, keep_num): #same as synthetic, except near clip
   ray_origins = rays[0]
   ray_directions = rays[1]
 
@@ -478,20 +478,23 @@ def gridcell_from_rays(rays, acc_grid, keep_num, threshold): #same as synthetic,
   tz = ((layers*(grid_max[2]-grid_min[2])+grid_min[2])-oz)/dz
 
   txyz = np.concatenate([tx, ty, tz], axis=-1)
-  txyzm = (txyz<=0.2).astype(dtype)
-  txyz = txyz*(1-txyzm) + 1000*txyzm
 
   #compute mask from acc_grid
   txyz = txyz + small_step
   world_positions = ray_origins[..., None, :] + \
                     ray_directions[..., None, :] * txyz[..., None]
   acc_grid_masks = get_acc_grid_masks(world_positions, acc_grid)
-  #remove empty cells for faster training
-  txyzm = (acc_grid_masks<threshold).astype(dtype)
-  txyz = txyz*(1-txyzm) + 1000*txyzm
 
-  txyz = np.sort(txyz, axis=-1)
-  to_keep = np.sum(np.min(txyz, axis=0) < 10)
+  #remove empty cells for faster training
+  keep_mask = txyz>0.2
+  potential_keep_mask = np.logical_and(keep_mask, acc_grid_masks>1e-3)
+  to_keep = np.max(np.sum(potential_keep_mask, axis=-1))
+
+  acc_grid_to_keep = acc_grid_masks * keep_mask
+  order = np.argsort(acc_grid_to_keep, axis=-1)[:, ::-1]
+
+  txyz = txyz*keep_mask + 1000*(1-keep_mask)
+  txyz = np.take_along_axis(txyz, order, axis=-1) 
   txyz = txyz[..., :keep_num]
 
   world_positions = ray_origins[..., None, :] + \
@@ -895,12 +898,6 @@ def compute_undc_intersection(point_grid, cell_xyz, masks, rays, keep_num):
   world_tx = np.sum(world_tx, -1) #[..., SN*24]
   world_tx = world_tx*world_masks + 1000*np.logical_not(world_masks).astype(dtype)
 
-  ind = np.argsort(world_tx, axis=-1)
-  ind = ind[..., :keep_num]
-
-  world_tx = np.take_along_axis(world_tx, ind, axis=-1)
-  world_masks = np.take_along_axis(world_masks, ind, axis=-1)
-  world_positions = np.take_along_axis(world_positions, ind[..., None], axis=-2)
   taper_positions = get_taper_coord(world_positions)
   taper_positions = taper_positions*world_masks[..., None]
 
@@ -1067,13 +1064,21 @@ def compute_volumetric_rendering_weights_with_alpha(alpha):
   weights = alpha * trans
   return weights
 
-def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
+def render_rays(rays, vars, keep_num, wbgcolor, rng):
 
   #---------- ray-plane intersection points
-  grid_indices, grid_masks, to_keep = gridcell_from_rays(rays, vars[1], keep_num, threshold)
+  grid_indices, grid_masks, to_keep = gridcell_from_rays(rays, vars[1], keep_num)
 
   pts, grid_masks, points, fake_t = compute_undc_intersection(vars[0],
                         grid_indices, grid_masks, rays, keep_num)
+
+  if scene_type=="forwardfacing":
+    fake_t = compute_t_forwardfacing(pts,grid_masks)
+  elif scene_type=="real360":
+    skybox_positions, skybox_masks = compute_box_intersection(rays)
+    pts = np.concatenate([pts,skybox_positions], axis=-2)
+    grid_masks = np.concatenate([grid_masks,skybox_masks], axis=-1)
+    pts, grid_masks, fake_t = sort_and_compute_t_real360(pts,grid_masks)
 
   # Now use the MLP to compute density and features
   mlp_alpha = density_model.apply(vars[-3], pts)
@@ -1128,12 +1133,11 @@ def render_rays(rays, vars, keep_num, threshold, wbgcolor, rng):
 #%%
 test_batch_size = 1024*n_device
 test_keep_num = point_grid_size*3//4
-test_threshold = 0.1
 test_wbgcolor = 0.0
 
 
 render_test_p = jax.pmap(lambda rays, vars: render_rays(
-    rays, vars, test_keep_num, test_threshold, test_wbgcolor, rng),
+    rays, vars, test_keep_num, test_wbgcolor, rng),
     in_axes=(0, None))
 
 
@@ -1298,7 +1302,7 @@ def random_ray_batch(rng, batch_size, data, vars):
     distances = data['depths'][cam_ind, y_ind, x_ind]
   return (ray_origin, ray_direction), pixels, distances, pose_shift
 
-def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num, threshold):
+def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_size, keep_num):
   key, rng = random.split(rng)
 
   def loss_fn(vars):
@@ -1306,7 +1310,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
         key, batch_size // n_device, traindata, vars)
 
     rgb_est, _, rgb_est_b, _, mlp_alpha, weights, points, fake_t, acc_grid_masks, weigheted_dist, to_keep = render_rays(
-        rays, vars, keep_num, threshold, wbgcolor, rng)
+        rays, vars, keep_num, wbgcolor, rng)
 
     loss_color_l2 = np.mean(np.square(rgb_est - pixels))
     #loss_color_l2_b = np.mean(np.square(rgb_est_b - pixels))
@@ -1378,8 +1382,9 @@ t_total = 0.0
 t_last = 0.0
 i_last = step_init
 keep_num = test_keep_num*4
-threshold = -100000.0
+
 max_grid_mask_num = 0
+reduce_keep_num = False
 
 training_iters = 200000
 train_iters_cont = 300000
@@ -1403,10 +1408,8 @@ for i in tqdm(range(step_init, training_iters + 1)):
     batch_size = test_batch_size//4
   elif i<=100000:
     batch_size = test_batch_size//2
-    threshold = test_threshold
   else:
     batch_size = test_batch_size
-    threshold = test_threshold
 
   rng, key1, key2 = random.split(rng, 3)
   key2 = random.split(key2, n_device)
@@ -1417,8 +1420,7 @@ for i in tqdm(range(step_init, training_iters + 1)):
       wbinary,
       wbgcolor,
       batch_size,
-      keep_num,
-      threshold
+      keep_num
       )
 
   psnrs.append(-10. * np.log10(color_loss_l2[0]))
@@ -1438,7 +1440,7 @@ for i in tqdm(range(step_init, training_iters + 1)):
     print('PSNR: %0.3f' % np.mean(np.array(psnrs[-200:])))
     to_keep_recent = np.array(to_keep_hist[-1000:])
     print(f'To keep: {np.max(to_keep_recent)}')
-    latest_grid_mask_num = np.mean(np.array(grid_mask_hist[-100:]))
+    latest_grid_mask_num = np.mean(np.array(grid_mask_hist[-1000:]))
     print(f'Grid masks: {latest_grid_mask_num:.3f}')
     if use_depth:
       print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-200:])))
@@ -1446,9 +1448,13 @@ for i in tqdm(range(step_init, training_iters + 1)):
       print("Pose shift: %0.5f" % np.mean(np.array(pose_shift_magnitudes[-200:])))
 
     new_keep_num = int(np.max(to_keep_recent))
-    if new_keep_num / keep_num < 0.9:
+    if reduce_keep_num and new_keep_num / keep_num < 0.9:
       print(f'Updating keep num: {keep_num} -> {new_keep_num}')
       keep_num = new_keep_num
+
+    max_grid_mask_num = max(max_grid_mask_num, latest_grid_mask_num)
+    if latest_grid_mask_num / max_grid_mask_num < 0.99:
+      reduce_keep_num = True
 
   if (i % 10000 == 0) and i > 0:
     gc.collect()
