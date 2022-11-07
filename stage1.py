@@ -126,7 +126,7 @@ def _transform_poses_pca(poses):
     transform = np.diag(np.array([1, -1, -1, 1])) @ transform
 
   # Just make sure it's it in the [-1, 1]^3 cube
-  scale_factor = 1. / (np.max(np.abs(poses_recentered[:, :3, 3])) + 0.5)
+  scale_factor = 1. / np.max(np.abs(poses_recentered[:, :3, 3]))
   poses_recentered[:, :3, 3] *= scale_factor
   transform = np.diag(np.array([scale_factor] * 3 + [1])) @ transform
 
@@ -460,6 +460,7 @@ def gridcell_from_rays(rays, acc_grid, keep_num): #same as synthetic, except nea
   dtype = ray_origins.dtype
   batch_shape = ray_origins.shape[:-1]
   small_step = 1e-5
+  epsilon = 1e-5
 
   ox = ray_origins[..., 0:1]
   oy = ray_origins[..., 1:2]
@@ -469,6 +470,15 @@ def gridcell_from_rays(rays, acc_grid, keep_num): #same as synthetic, except nea
   dy = ray_directions[..., 1:2]
   dz = ray_directions[..., 2:3]
 
+  dxm = (np.abs(dx)<epsilon).astype(dtype)
+  dym = (np.abs(dy)<epsilon).astype(dtype)
+  dzm = (np.abs(dz)<epsilon).astype(dtype)
+
+  #avoid zero div
+  dx = dx+dxm
+  dy = dy+dym
+  dz = dz+dzm
+
   layers = np.arange(point_grid_size+1,dtype=dtype)/point_grid_size #[0,1]
   layers = np.reshape(layers, [1]*len(batch_shape)+[point_grid_size+1])
   layers = np.broadcast_to(layers, list(batch_shape)+[point_grid_size+1])
@@ -477,7 +487,13 @@ def gridcell_from_rays(rays, acc_grid, keep_num): #same as synthetic, except nea
   ty = ((layers*(grid_max[1]-grid_min[1])+grid_min[1])-oy)/dy
   tz = ((layers*(grid_max[2]-grid_min[2])+grid_min[2])-oz)/dz
 
+  tx = tx*(1-dxm) + 1000*dxm
+  ty = ty*(1-dym) + 1000*dym
+  tz = tz*(1-dzm) + 1000*dzm
+
   txyz = np.concatenate([tx, ty, tz], axis=-1)
+  txyzm = (txyz<=0.2).astype(dtype)
+  txyz = txyz*(1-txyzm) + 1000*txyzm
 
   #compute mask from acc_grid
   txyz = txyz + small_step
@@ -493,9 +509,10 @@ def gridcell_from_rays(rays, acc_grid, keep_num): #same as synthetic, except nea
   acc_grid_to_keep = acc_grid_masks * keep_mask
   order = np.argsort(acc_grid_to_keep, axis=-1)[:, ::-1]
 
-  txyz = txyz*keep_mask + 1000*(1-keep_mask)
   txyz = np.take_along_axis(txyz, order, axis=-1) 
   txyz = txyz[..., :keep_num]
+
+  txyz = np.sort(txyz, axis=-1)
 
   world_positions = ray_origins[..., None, :] + \
                     ray_directions[..., None, :] * txyz[..., None]
@@ -897,9 +914,6 @@ def compute_undc_intersection(point_grid, cell_xyz, masks, rays, keep_num):
   world_tx = world_positions*ray_directions[..., None,:]
   world_tx = np.sum(world_tx, -1) #[..., SN*24]
   world_tx = world_tx*world_masks + 1000*np.logical_not(world_masks).astype(dtype)
-  
-  ind = np.argsort(world_tx, axis=-1)
-  ind = ind[..., :keep_num]
 
   ind = np.argsort(world_tx, axis=-1)
   ind = ind[..., :keep_num]
@@ -936,6 +950,7 @@ def compute_box_intersection(rays):
 
   dtype = ray_origins.dtype
   batch_shape = ray_origins.shape[:-1]
+  epsilon = 1e-10
 
   ox = ray_origins[..., 0:1]
   oy = ray_origins[..., 1:2]
@@ -944,6 +959,13 @@ def compute_box_intersection(rays):
   dx = ray_directions[..., 0:1]
   dy = ray_directions[..., 1:2]
   dz = ray_directions[..., 2:3]
+
+  dxm = (np.abs(dx)<epsilon)
+  dym = (np.abs(dy)<epsilon)
+
+  #avoid zero div
+  dx = dx+dxm.astype(dtype)
+  dy = dy+dym.astype(dtype)
 
   layers_ = np.arange((point_grid_size//2)+1,dtype=dtype)/(point_grid_size//2) #[0,1]
   layers = (np.exp( layers_ * scene_grid_zcc ) + (scene_grid_zcc-1)) / scene_grid_zcc
@@ -1095,6 +1117,14 @@ def render_rays(rays, vars, keep_num, wbgcolor, rng):
   mlp_alpha = jax.nn.sigmoid(mlp_alpha[..., 0]-8)
   mlp_alpha = mlp_alpha * grid_masks
 
+  weights = compute_volumetric_rendering_weights_with_alpha(mlp_alpha)
+  acc = np.sum(weights, axis=-1)
+
+  mlp_alpha_b = mlp_alpha + jax.lax.stop_gradient(
+    np.clip((mlp_alpha>0.5).astype(mlp_alpha.dtype), 0.00001,0.99999) - mlp_alpha)
+  weights_b = compute_volumetric_rendering_weights_with_alpha(mlp_alpha_b)
+  acc_b = np.sum(weights_b, axis=-1)
+
   weigheted_dist = None
   if use_depth:
     dist = np.linalg.norm(pts - rays[0][:, None, :], axis=-1)
@@ -1107,14 +1137,6 @@ def render_rays(rays, vars, keep_num, wbgcolor, rng):
     weigheted_dist = np.sum(dist * alpha_change, axis=-1)
     change_acc = np.sum(alpha_change, axis=-1)
     weigheted_dist += (1. - change_acc) * default_dist
-
-  weights = compute_volumetric_rendering_weights_with_alpha(mlp_alpha)
-  acc = np.sum(weights, axis=-1)
-
-  mlp_alpha_b = mlp_alpha + jax.lax.stop_gradient(
-    np.clip((mlp_alpha>0.5).astype(mlp_alpha.dtype), 0.00001,0.99999) - mlp_alpha)
-  weights_b = compute_volumetric_rendering_weights_with_alpha(mlp_alpha_b)
-  acc_b = np.sum(weights_b, axis=-1)
 
   # ... as well as view-dependent colors.
   dirs = normalize(rays[1])
@@ -1223,9 +1245,6 @@ def camera_ray_batch(cam2world, hwf, vars):
     ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
     ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
 
-  epsilon = 1e-5
-  ray_direction = ray_direction + (np.abs(ray_direction)<epsilon) * epsilon
-
   return (ray_origin, ray_direction)
 
 def generate_test_samples(iteration, model, num=test_samples):
@@ -1303,9 +1322,6 @@ def random_ray_batch(rng, batch_size, data, vars):
     ray_origin = np.sum(ray_origin[..., None, :] * rotation_matrices, axis=-1) + translation_vectors
     ray_direction = np.sum(ray_direction[..., None, :] * rotation_matrices, axis=-1)
 
-  epsilon = 1e-5
-  ray_direction = ray_direction + (np.abs(ray_direction)<epsilon) * epsilon
-
   pixels = data['images'][cam_ind, y_ind, x_ind]
   distances = None
   if use_depth:
@@ -1340,7 +1356,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
 
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
     loss_acc += np.mean(np.abs(vars[1])) * 1e-2
-    loss_acc += compute_TV(vars[1]) * 1e-1
+    loss_acc += compute_TV(vars[1]) * 1e-2
 
     if use_pose:
       pose_shift_magnitude = np.mean(np.abs(pose_shift))
@@ -1453,9 +1469,9 @@ for i in tqdm(range(step_init, training_iters + 1)):
     latest_grid_mask_num = np.mean(np.array(grid_mask_hist[-1000:]))
     print(f'Grid masks: {latest_grid_mask_num:.3f}')
     if use_depth:
-      print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-200:])))
+      print("Dist error (m): %0.3f" % np.mean(np.array(dist_err_real[-1000:])))
     if use_pose:
-      print("Pose shift: %0.5f" % np.mean(np.array(pose_shift_magnitudes[-200:])))
+      print("Pose shift: %0.5f" % np.mean(np.array(pose_shift_magnitudes[-1000:])))
 
     new_keep_num = int(np.max(to_keep_recent))
     if reduce_keep_num and new_keep_num / keep_num < 0.9:
