@@ -901,9 +901,13 @@ def compute_undc_intersection(point_grid, cell_xyz, masks, rays, keep_num):
   ind = np.argsort(world_tx, axis=-1)
   ind = ind[..., :keep_num]
 
+  ind = np.argsort(world_tx, axis=-1)
+  ind = ind[..., :keep_num]
+
   world_tx = np.take_along_axis(world_tx, ind, axis=-1)
   world_masks = np.take_along_axis(world_masks, ind, axis=-1)
   world_positions = np.take_along_axis(world_positions, ind[..., None], axis=-2)
+
   taper_positions = get_taper_coord(world_positions)
   taper_positions = taper_positions*world_masks[..., None]
 
@@ -1271,10 +1275,10 @@ def lossfun_distortion(x, w):
   return losses_cross + losses_self
 
 def compute_TV(acc_grid):
-  dx = acc_grid[:-1,:,:] - acc_grid[1:,:,:]
-  dy = acc_grid[:,:-1,:] - acc_grid[:,1:,:]
-  dz = acc_grid[:,:,:-1] - acc_grid[:,:,1:]
-  TV = np.mean(np.square(dx))+np.mean(np.square(dy))+np.mean(np.square(dz))
+  dx = np.abs(np.diff(acc_grid, axis=0, prepend=0))
+  dy = np.abs(np.diff(acc_grid, axis=1, prepend=0))
+  dz = np.abs(np.diff(acc_grid, axis=2, prepend=0))
+  TV = np.mean(np.square(dx + dy + dz))
   return TV
 
 def random_ray_batch(rng, batch_size, data, vars):
@@ -1321,7 +1325,7 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     loss_color_l2 = np.mean(np.square(rgb_est - pixels))
     #loss_color_l2_b = np.mean(np.square(rgb_est_b - pixels))
 
-    dist_loss_l2 = 0
+    dist_loss = 0
     if use_depth:
       dist_filter = np.where(distances > 2.5, 0, 1)
       total_filter = dist_filter.size
@@ -1331,12 +1335,12 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
       dist_diff = distances - weigheted_dist
       dist_diff = dist_diff * dist_filter
 
-      dist_loss_l2 = np.mean(np.square(dist_diff)) / non_zero_ratio
+      dist_loss = np.mean(np.square(dist_diff)) / non_zero_ratio
       dist_err = np.mean(np.abs(dist_diff)) / non_zero_ratio
 
     loss_acc = np.mean(np.maximum(jax.lax.stop_gradient(weights) - acc_grid_masks,0))
-    loss_acc += np.mean(np.abs(vars[1])) * 1e-5
-    loss_acc += compute_TV(vars[1]) * 1e-5
+    loss_acc += np.mean(np.abs(vars[1])) * 1e-2
+    loss_acc += compute_TV(vars[1]) * 1e-1
 
     if use_pose:
       pose_shift_magnitude = np.mean(np.abs(pose_shift))
@@ -1350,9 +1354,9 @@ def train_step(state, rng, traindata, lr, wdistortion, wbinary, wbgcolor, batch_
     point_mask = point_loss<(grid_max - grid_min)/point_grid_size/2
     point_loss = np.mean(np.where(point_mask, point_loss_in, point_loss_out))
 
-    num_grid_mask = np.count_nonzero(acc_grid_masks > 0.1)
+    num_grid_mask = np.count_nonzero(acc_grid_masks > 0.1) / batch_size
 
-    return loss_color_l2 + (dist_loss_l2 * depth_weight) + loss_distortion + loss_acc + point_loss, (loss_color_l2, dist_err, pose_shift_magnitude, to_keep, num_grid_mask)
+    return loss_color_l2 + (dist_loss * depth_weight) + loss_distortion + loss_acc + point_loss, (loss_color_l2, dist_err, pose_shift_magnitude, to_keep, num_grid_mask)
 
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
   (total_loss, (color_loss_l2, dist_err, pose_shift_magnitude, to_keep, num_grid_mask)), grad = grad_fn(state.target)
@@ -1455,8 +1459,9 @@ for i in tqdm(range(step_init, training_iters + 1)):
 
     new_keep_num = int(np.max(to_keep_recent))
     if reduce_keep_num and new_keep_num / keep_num < 0.9:
-      print(f'Updating keep num: {keep_num} -> {new_keep_num}')
-      keep_num = new_keep_num
+      updated_keep_num = keep_num - int((new_keep_num - keep_num) // 2)
+      print(f'Updating keep num: {keep_num} -> {updated_keep_num}')
+      keep_num = updated_keep_num
 
     max_grid_mask_num = max(max_grid_mask_num, latest_grid_mask_num)
     if latest_grid_mask_num / max_grid_mask_num < 0.99:
